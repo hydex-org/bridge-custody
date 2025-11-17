@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: bridge-custody/Dockerfile
+    container_name: mpc-node-1
+    command: ["--node-id", "1", "--config", "/config/node1.toml", "--init-dkg"]
+    volumes:
+      - ./config:/config
+    networks:
+      - mpc-network
+    environment:
+      - RUST_LOG=bridge_custody=debug,info
+
+  node2:
+    build:
+      context: ..
+      dockerfile: bridge-custody/Dockerfile
+    container_name: mpc-node-2
+    command: ["--node-id", "2", "--config", "/config/node2.toml", "--init-dkg"]
+    volumes:
+      - ./config:/config
+    networks:
+      - mpc-network
+    environment:
+      - RUST_LOG=bridge_custody=debug,info
+
+  node3:
+    build:
+      context: ..
+      dockerfile: bridge-custody/Dockerfile
+    container_name: mpc-node-3
+    command: ["--node-id", "3", "--config", "/config/node3.toml", "--init-dkg"]
+    volumes:
+      - ./config:/config
+    networks:
+      - mpc-network
+    environment:
+      - RUST_LOG=bridge_custody=debug,info
+
+networks:
+  mpc-network:
+    driver: bridge

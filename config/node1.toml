@@ -1,0 +1,30 @@
+# node1.toml
+node_id = 1
+total_nodes = 3
+threshold = 2
+
+[[peers]]
+node_id = 1
+grpc_address = "node1:50051"
+
+[[peers]]
+node_id = 2
+grpc_address = "node2:50052"
+
+[[peers]]
+node_id = 3
+grpc_address = "node3:50053"
+
+[zcash]
+rpc_url = "http://zcashd:18232"
+rpc_user = "zcashrpc"
+rpc_password = "password"
+network = "testnet"
+
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+bridge_program_id = "Disabled"
+
+[network]
+listen_address = "0.0.0.0"
+port = 50051
