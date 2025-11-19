@@ -1,30 +1,19 @@
 use anyhow::Result;
+use bridge_custody::{dkg_coordinator, mpc_node, network, network_http, types};
 use clap::Parser;
 use std::collections::HashMap;
-use tracing_subscriber;
 
-mod types;
-mod mpc_node;
-mod dkg_coordinator;
-mod frost_signer;
-mod network;
-mod network_http;
-mod zcash_client;
-mod ua_builder;
-mod solana_listener;
-
-#[derive(Parser)]
-#[command(name = "mpc-node")]
-#[command(about = "MPC custody node for Zcash bridge")]
+#[derive(Parser, Debug)]
+#[clap(name = "mpc-node")]
+#[clap(about = "MPC custody node for Zcash-Solana bridge", long_about = None)]
 struct Cli {
     /// Path to configuration file
-    #[arg(short, long, default_value = "config/node.toml")]
+    #[clap(short, long, default_value = "config/node.toml")]
     config: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -62,10 +51,11 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
         }
     });
 
-   // Wait for all servers to start (Docker networking overhead)
-println!("⏳ Waiting for all nodes to start HTTP servers...");
-tokio::time::sleep(tokio::time::Duration::from_secs(8)).await;
-println!("✓ Ready to begin DKG");
+    // Wait for all servers to start (Docker networking overhead)
+    println!("⏳ Waiting for all nodes to start HTTP servers...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(8)).await;
+    println!("✓ Ready to begin DKG");
+
     // Build peer map
     let peers: HashMap<u16, String> = config
         .peers
@@ -90,6 +80,7 @@ println!("✓ Ready to begin DKG");
             println!("✅ DKG Complete!");
             println!("   Bridge UA: {}", result.bridge_ua);
             println!("   Group Key: {}", hex::encode(&result.group_verifying_key));
+            println!("   👁️  UFVK: {}", result.full_viewing_key);
             
             // Save to disk
             std::fs::create_dir_all("/data")?;
@@ -107,6 +98,7 @@ println!("✓ Ready to begin DKG");
 
     // Keep server running
     println!("🌐 Node running... Press Ctrl+C to stop");
+    
     tokio::signal::ctrl_c().await?;
     println!("👋 Shutting down");
 
@@ -174,7 +166,7 @@ mod tests {
                 match coordinator.run_ceremony("testnet").await {
                     Ok(result) => {
                         println!("✓ Node {} DKG complete: {}", node_id, result.bridge_ua);
-                        Ok(result.bridge_ua)
+                        Ok(result)
                     }
                     Err(e) => {
                         println!("✗ Node {} DKG failed: {}", node_id, e);
@@ -189,10 +181,10 @@ mod tests {
         let mut results = vec![];
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
-                Ok(Ok(ua)) => {
+                Ok(Ok(result)) => {
                     println!("✅ Node {} completed DKG", i + 1);
-                    println!("   Bridge UA: {}\n", ua);
-                    results.push(ua);
+                    println!("   Bridge UA: {}\n", result.bridge_ua);
+                    results.push(result);
                 }
                 Ok(Err(e)) => {
                     println!("❌ Node {} failed: {}", i + 1, e);
@@ -206,14 +198,19 @@ mod tests {
         }
         
         assert_eq!(results.len(), 3, "All 3 nodes should complete");
-        assert_eq!(results[0], results[1], "Node 1 and 2 should have same UA");
-        assert_eq!(results[1], results[2], "Node 2 and 3 should have same UA");
+        assert_eq!(results[0].bridge_ua, results[1].bridge_ua, "Node 1 and 2 should have same UA");
+        assert_eq!(results[1].bridge_ua, results[2].bridge_ua, "Node 2 and 3 should have same UA");
         
         // Verify it's a real Zcash address
-        assert!(results[0].starts_with("utest1"), "Should be testnet UA");        assert!(!results[0].contains("PLACEHOLDER"), "Should not be placeholder");
+        assert!(results[0].bridge_ua.starts_with("utest1"), "Should be testnet UA");
+        assert!(!results[0].bridge_ua.contains("PLACEHOLDER"), "Should not be placeholder");
+        
+        // Verify UFVK is ZIP 316-compliant
+        assert!(results[0].full_viewing_key.starts_with("uviewtest"), "Should be ZIP 316 testnet UFVK");
         
         println!("✅ SUCCESS! All nodes generated the same bridge address:");
-        println!("   {}", results[0]);
+        println!("   UA: {}", results[0].bridge_ua);
+        println!("   UFVK: {}", results[0].full_viewing_key);
         println!("\n🎉 DKG Ceremony Complete!");
     }
 }

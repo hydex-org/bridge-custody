@@ -36,6 +36,11 @@ impl BridgeAddressGenerator {
     }
 
     /// Convert FROST group key to Orchard spending key
+    /// 
+    /// ⚠️ SECURITY WARNING: This is INSECURE for production!
+    /// The spending key is derived from the PUBLIC group verifying key,
+    /// making funds theoretically vulnerable. This is acceptable for testnet
+    /// development but MUST be replaced with proper key derivation for mainnet.
     fn frost_key_to_orchard_sk(frost_key: &[u8]) -> Result<SpendingKey> {
         if frost_key.len() != 32 {
             anyhow::bail!("FROST key must be 32 bytes, got {}", frost_key.len());
@@ -53,7 +58,39 @@ impl BridgeAddressGenerator {
         Ok(sk)
     }
 
-    /// Derive Full Viewing Key from FROST group key
+    /// Derive Orchard Full Viewing Key for Arcium Enclave
+    /// 
+    /// Returns the Orchard FVK encoded as hex with network prefix.
+    /// This can be used by the Arcium Enclave for scanning Zcash blocks.
+    /// 
+    /// Note: For full ZIP 316 UFVK compliance (uviewtest... format),
+    /// we would need to implement manual F4Jumble + Bech32m encoding
+    /// or use a newer version of zcash_keys with better API support.
+    pub fn derive_ufvk_encoded(
+        frost_group_key: &[u8],
+        network: &str,
+    ) -> Result<String> {
+        // Get Orchard FVK
+        let sk = Self::frost_key_to_orchard_sk(frost_group_key)?;
+        let orchard_fvk = FullViewingKey::from(&sk);
+        
+        // Encode FVK bytes as hex
+        let fvk_bytes = orchard_fvk.to_bytes();
+        
+        // Add network prefix for clarity
+        let prefix = match network {
+            "mainnet" => "orchard-fvk-main",
+            "testnet" => "orchard-fvk-test",
+            _ => anyhow::bail!("Invalid network: {}", network),
+        };
+        
+        // Return hex-encoded FVK with prefix
+        // Format: "orchard-fvk-test:hexbytes..."
+        // The Enclave can parse this and use the hex bytes for scanning
+        Ok(format!("{}:{}", prefix, hex::encode(&fvk_bytes)))
+    }
+
+    /// Derive raw Orchard Full Viewing Key (for internal use)
     pub fn derive_fvk(frost_group_key: &[u8]) -> Result<FullViewingKey> {
         let sk = Self::frost_key_to_orchard_sk(frost_group_key)?;
         Ok(FullViewingKey::from(&sk))
@@ -73,8 +110,8 @@ mod tests {
         let ua = BridgeAddressGenerator::generate_bridge_ua(&frost_key, "testnet")
             .expect("Should generate valid UA");
         
-        // Verify it starts with u1test (testnet unified address)
-        assert!(ua.starts_with("u1test"), "Should be testnet UA, got: {}", ua);
+        // Verify it starts with utest1 (testnet unified address)
+        assert!(ua.starts_with("utest1"), "Should be testnet UA, got: {}", ua);
         
         // Verify it's not a placeholder
         assert!(!ua.contains("PLACEHOLDER"), "Should not be placeholder");
@@ -91,5 +128,30 @@ mod tests {
         // Verify we can get an address from it
         let address = fvk.address_at(0u32, orchard::keys::Scope::External);
         assert_eq!(address.to_raw_address_bytes().len(), 43);
+    }
+
+    #[test]
+    fn test_ufvk_encoding() {
+        let frost_key = [0x42u8; 32];
+        
+        // Test testnet FVK encoding
+        let fvk_testnet = BridgeAddressGenerator::derive_ufvk_encoded(&frost_key, "testnet")
+            .expect("Should derive testnet FVK");
+        
+        // Verify it has the correct prefix
+        assert!(
+            fvk_testnet.starts_with("orchard-fvk-test:"),
+            "Testnet FVK should start with 'orchard-fvk-test:', got: {}",
+            fvk_testnet
+        );
+        
+        println!("Testnet FVK: {}", fvk_testnet);
+        
+        // Verify hex portion is valid
+        let hex_part = fvk_testnet.split(':').nth(1).unwrap();
+        assert!(
+            hex_part.len() > 0 && hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "FVK hex should be valid hex"
+        );
     }
 }

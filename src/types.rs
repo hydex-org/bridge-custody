@@ -53,6 +53,7 @@ pub struct DkgResult {
     pub key_share: Vec<u8>,
     pub group_verifying_key: Vec<u8>,
     pub bridge_ua: String,
+    pub full_viewing_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

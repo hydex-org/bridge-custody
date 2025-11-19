@@ -1,15 +1,17 @@
-use anyhow::{Context, Result};
-use frost_pallas::{keys::dkg, Identifier};
-use rand::thread_rng;
+use anyhow::Result;
+use frost_pallas::keys::dkg;
+use frost_pallas::Identifier;
 use std::collections::BTreeMap;
-use tracing::{info, debug};
+use tracing::{debug, info};
+use rand::thread_rng;
 
-use crate::types::DkgResult;
 use crate::network::NetworkClient;
 use crate::network_http::HttpNetworkClient;
+use crate::types::DkgResult;
 use crate::ua_builder::BridgeAddressGenerator;
 
-enum NetworkBackend {
+#[derive(Clone)]
+pub enum NetworkBackend {
     InMemory(NetworkClient),
     Http(HttpNetworkClient),
 }
@@ -22,7 +24,6 @@ pub struct DkgCoordinator {
 }
 
 impl DkgCoordinator {
-    /// Create coordinator with in-memory network (for tests)
     pub fn new(
         node_id: u16,
         total_nodes: u16,
@@ -37,7 +38,6 @@ impl DkgCoordinator {
         }
     }
 
-    /// Create coordinator with HTTP network (for production)
     pub fn new_with_http(
         node_id: u16,
         total_nodes: u16,
@@ -52,53 +52,51 @@ impl DkgCoordinator {
         }
     }
 
-    /// Run complete DKG ceremony (3 rounds)
     pub async fn run_ceremony(&mut self, zcash_network: &str) -> Result<DkgResult> {
-        info!("🔐 Starting DKG ceremony");
-        info!("   Node {}/{} (threshold: {})", self.node_id, self.total_nodes, self.threshold);
-
-        let my_id: Identifier = self.node_id.try_into()
-            .context("Invalid node ID")?;
-
-        // ROUND 1: Generate commitments
-        info!("📋 Round 1: Generating commitments...");
+        info!("Starting DKG ceremony for node {}", self.node_id);
+        
+        let my_id: Identifier = self.node_id.try_into()?;
+        
+        // Round 1: Generate and exchange commitments
+        info!("Round 1: Generating commitments");
         let (round1_secret, round1_package) = self.dkg_round1(my_id)?;
-        
         let round1_packages = self.exchange_round1_packages(my_id, round1_package).await?;
-        info!("✓ Round 1 complete - received {} packages from others", round1_packages.len());
-
-        // ROUND 2: Generate and distribute shares
-        info!("📋 Round 2: Distributing secret shares...");
-        let (round2_secret, round2_packages) = self.dkg_round2(round1_secret, &round1_packages)?;
         
-        let my_round2_packages = self.exchange_round2_packages(my_id, round2_packages).await?;
-        info!("✓ Round 2 complete - received {} packages from others", my_round2_packages.len());
-
-        // ROUND 3: Finalize keys
-        info!("📋 Round 3: Finalizing keys...");
+        // Round 2: Generate and exchange shares
+        info!("Round 2: Generating shares");
+        let (round2_secret, my_round2_packages) = self.dkg_round2(round1_secret, &round1_packages)?;
+        let round2_packages = self.exchange_round2_packages(my_id, my_round2_packages).await?;
+        
+        // Round 3: Finalize key shares
+        info!("Round 3: Finalizing key shares");
         let (_key_package, public_key_package) = self.dkg_round3(
             &round2_secret,
             &round1_packages,
-            &my_round2_packages,
+            &round2_packages,
         )?;
 
         let group_vk = public_key_package.verifying_key();
         let vk_bytes = group_vk.serialize()?;
         
         info!("✓ Round 3 complete!");
-        info!("✅ DKG ceremony successful!");
-        info!("   Group key: {}", hex::encode(&vk_bytes));
 
         // Generate REAL Zcash Unified Address
         let bridge_ua = BridgeAddressGenerator::generate_bridge_ua(&vk_bytes, zcash_network)?;
-        
-        info!("🎉 Bridge UA generated: {}", bridge_ua);
+
+        // Derive Orchard Full Viewing Key for Enclave
+        let ufvk_encoded = BridgeAddressGenerator::derive_ufvk_encoded(&vk_bytes, zcash_network)?;
+
+        info!("✅ DKG ceremony successful!");
+        info!("   Group key: {}", hex::encode(&vk_bytes));
+        info!("🎉 Bridge UA: {}", bridge_ua);
+        info!("👁️  FVK (Orchard): {}", ufvk_encoded);
 
         Ok(DkgResult {
             node_id: self.node_id,
             key_share: vec![], // TODO: Serialize key_package
             group_verifying_key: vk_bytes,
             bridge_ua,
+            full_viewing_key: ufvk_encoded,
         })
     }
 
@@ -136,14 +134,14 @@ impl DkgCoordinator {
         round1_packages: &BTreeMap<Identifier, dkg::round1::Package>,
         round2_packages: &BTreeMap<Identifier, dkg::round2::Package>,
     ) -> Result<(frost_pallas::keys::KeyPackage, frost_pallas::keys::PublicKeyPackage)> {
-        let (key_package, public_key_package) = dkg::part3(
+        let (_key_package, public_key_package) = dkg::part3(
             round2_secret,
             round1_packages,
             round2_packages,
         )?;
         
         debug!("Round 3: Key finalized");
-        Ok((key_package, public_key_package))
+        Ok((_key_package, public_key_package))
     }
 
     async fn exchange_round1_packages(

@@ -11,6 +11,7 @@ frost-pallas = { path = "../frost-pallas" }
 zcash_primitives = "0.13"
 zcash_client_backend = "0.12"
 zcash_address = "0.3"
+zcash_keys = "0.2"  # ← ADD THIS for ZIP 316-compliant UFVK encoding
 orchard = "0.7"
 
 # Crypto primitives

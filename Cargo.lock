@@ -344,6 +344,7 @@ dependencies = [
  "tracing-subscriber",
  "zcash_address",
  "zcash_client_backend",
+ "zcash_keys",
  "zcash_primitives 0.13.0",
 ]
 

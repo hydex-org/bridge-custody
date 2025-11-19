@@ -124,7 +124,7 @@ impl HttpNetworkClient {
         anyhow::bail!("Timeout waiting for Round 1 from node {}", from_node)
     }
 
-    /// Send Round 2 package to specific peer (stores on OUR server for them to retrieve)
+   /// Send Round 2 package to specific peer (stores on OUR server for them to retrieve)
 pub async fn send_round2(&self, to_node: u16, data: Vec<u8>) -> Result<()> {
     let payload = DkgRound2Message {
         from_node: self.node_id,
@@ -159,7 +159,6 @@ pub async fn send_round2(&self, to_node: u16, data: Vec<u8>) -> Result<()> {
     
     anyhow::bail!("Failed to store Round 2 for node {} after 5 attempts", to_node)
 }
-
     /// Receive Round 2 package from specific peer
     pub async fn receive_round2(&self, from_node: u16, to_node: u16) -> Result<Vec<u8>> {
         let peer_addr = self.peers.get(&from_node)
