@@ -1,45 +1,86 @@
 version: '3.8'
 
 services:
-  node1:
+  mpc-node1:
     build:
       context: ..
       dockerfile: bridge-custody/Dockerfile
-    container_name: mpc-node-1
-    command: ["--node-id", "1", "--config", "/config/node1.toml", "--init-dkg"]
-    volumes:
-      - ./config:/config
-    networks:
-      - mpc-network
+    container_name: mpc-node1
+    hostname: mpc-node1
     environment:
-      - RUST_LOG=bridge_custody=debug,info
+      - RUST_LOG=bridge_custody=info
+      - RUST_BACKTRACE=1
+    volumes:
+      - ./config/node1.toml:/app/config/node.toml
+      - ./data/node1:/data
+    networks:
+      mpc-network:
+        ipv4_address: 172.20.0.11
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
-  node2:
+  mpc-node2:
     build:
       context: ..
       dockerfile: bridge-custody/Dockerfile
-    container_name: mpc-node-2
-    command: ["--node-id", "2", "--config", "/config/node2.toml", "--init-dkg"]
-    volumes:
-      - ./config:/config
-    networks:
-      - mpc-network
+    container_name: mpc-node2
+    hostname: mpc-node2
     environment:
-      - RUST_LOG=bridge_custody=debug,info
+      - RUST_LOG=bridge_custody=info
+      - RUST_BACKTRACE=1
+    volumes:
+      - ./config/node2.toml:/app/config/node.toml
+      - ./data/node2:/data
+    networks:
+      mpc-network:
+        ipv4_address: 172.20.0.12
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - mpc-node1
 
-  node3:
+  mpc-node3:
     build:
       context: ..
       dockerfile: bridge-custody/Dockerfile
-    container_name: mpc-node-3
-    command: ["--node-id", "3", "--config", "/config/node3.toml", "--init-dkg"]
-    volumes:
-      - ./config:/config
-    networks:
-      - mpc-network
+    container_name: mpc-node3
+    hostname: mpc-node3
     environment:
-      - RUST_LOG=bridge_custody=debug,info
+      - RUST_LOG=bridge_custody=info
+      - RUST_BACKTRACE=1
+    volumes:
+      - ./config/node3.toml:/app/config/node.toml
+      - ./data/node3:/data
+    networks:
+      mpc-network:
+        ipv4_address: 172.20.0.13
+    ports:
+      - "8083:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - mpc-node1
+      - mpc-node2
 
 networks:
   mpc-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

@@ -1,20 +1,19 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
 /// Simple in-memory network for testing (simulates P2P)
-/// In production, this would be gRPC/libp2p
-#[derive(Clone)]  // ← ADD THIS
+#[derive(Clone)]
 pub struct NetworkClient {
     node_id: u16,
     storage: Arc<Mutex<NetworkStorage>>,
 }
 
 #[derive(Default)]
-struct NetworkStorage {
+pub struct NetworkStorage {
     round1_messages: HashMap<u16, Vec<u8>>,
-    round2_messages: HashMap<(u16, u16), Vec<u8>>, // (from, to) -> data
+    round2_messages: HashMap<(u16, u16), Vec<u8>>,
 }
 
 impl NetworkClient {
@@ -22,16 +21,13 @@ impl NetworkClient {
         Self { node_id, storage }
     }
 
-    /// Broadcast Round 1 package to all nodes
     pub async fn broadcast_round1(&self, from: u16, data: Vec<u8>) -> Result<()> {
         let mut store = self.storage.lock().unwrap();
         store.round1_messages.insert(from, data);
         Ok(())
     }
 
-    /// Receive Round 1 package from a node
     pub async fn receive_round1(&self, from: u16) -> Result<Vec<u8>> {
-        // Poll until message is available
         for _ in 0..100 {
             {
                 let store = self.storage.lock().unwrap();
@@ -44,16 +40,13 @@ impl NetworkClient {
         anyhow::bail!("Timeout waiting for Round 1 from node {}", from)
     }
 
-    /// Send Round 2 package to specific node
     pub async fn send_round2(&self, from: u16, to: u16, data: Vec<u8>) -> Result<()> {
         let mut store = self.storage.lock().unwrap();
         store.round2_messages.insert((from, to), data);
         Ok(())
     }
 
-    /// Receive Round 2 package from specific node
     pub async fn receive_round2(&self, from: u16, to: u16) -> Result<Vec<u8>> {
-        // Poll until message is available
         for _ in 0..100 {
             {
                 let store = self.storage.lock().unwrap();
@@ -67,7 +60,6 @@ impl NetworkClient {
     }
 }
 
-/// Create shared network storage for all nodes
 pub fn create_shared_network() -> Arc<Mutex<NetworkStorage>> {
     Arc::new(Mutex::new(NetworkStorage::default()))
 }

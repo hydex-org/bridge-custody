@@ -1,30 +1,25 @@
-# node1.toml
-node_id = 1
+node_id = 2
 total_nodes = 3
 threshold = 2
 
 [[peers]]
 node_id = 1
-grpc_address = "node1:50051"
-
-[[peers]]
-node_id = 2
-grpc_address = "node2:50052"
+address = "http://mpc-node1:8080"
 
 [[peers]]
 node_id = 3
-grpc_address = "node3:50053"
-
-[zcash]
-rpc_url = "http://zcashd:18232"
-rpc_user = "zcashrpc"
-rpc_password = "password"
-network = "testnet"
-
-[solana]
-rpc_url = "https://api.devnet.solana.com"
-bridge_program_id = "Disabled"
+address = "http://mpc-node3:8080"
 
 [network]
 listen_address = "0.0.0.0"
-port = 50051
+port = 8080
+
+[zcash]
+rpc_url = "http://zcashd:18232"
+rpc_user = "zcash"
+rpc_password = "zcash"
+network = "testnet"
+
+[solana]
+rpc_url = "http://solana:8899"
+bridge_program_id = "BRIDGExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

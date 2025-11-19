@@ -1,60 +1,44 @@
-use anyhow::{Result, Context};
-use tracing::{info, error};
-use std::sync::{Arc, Mutex};
-
-use crate::types::*;
+use anyhow::Result;
+use crate::types::NodeConfig;
+use crate::network::NetworkClient;
 use crate::dkg_coordinator::DkgCoordinator;
-use crate::network::{NetworkClient, NetworkStorage};
+use std::sync::{Arc, Mutex};
 
 pub struct MpcNode {
     config: NodeConfig,
-    network: NetworkClient,
-    dkg_result: Option<DkgResult>,
+    pub network: NetworkClient,  // Made public for tests
 }
 
 impl MpcNode {
-    pub fn new(config: NodeConfig, network_storage: Arc<Mutex<NetworkStorage>>) -> Result<Self> {
-        info!("Initializing MPC node {}", config.node_id);
-        
+    pub fn new(
+        config: NodeConfig,
+        network_storage: Arc<Mutex<crate::network::NetworkStorage>>,
+    ) -> Result<Self> {
         let network = NetworkClient::new(config.node_id, network_storage);
         
-        Ok(Self { 
+        Ok(Self {
             config,
             network,
-            dkg_result: None,
         })
     }
-    
+
     pub async fn initialize_with_dkg(&mut self) -> Result<String> {
-        info!("Starting DKG ceremony for node {}", self.config.node_id);
-        
         let mut coordinator = DkgCoordinator::new(
             self.config.node_id,
             self.config.total_nodes,
             self.config.threshold,
-            self.network.clone(), // TODO: Make NetworkClient cloneable
+            self.network.clone(),
         );
-        
-        let dkg_result = coordinator.run_ceremony().await?;
-        let bridge_ua = dkg_result.bridge_ua.clone();
-        
-        self.dkg_result = Some(dkg_result);
-        
-        Ok(bridge_ua)
+
+        let result = coordinator.run_ceremony(&self.config.zcash.network).await?;
+        Ok(result.bridge_ua)
     }
-    
+
     pub fn load_existing_keys(&mut self) -> Result<()> {
-        info!("Loading existing keys for node {}", self.config.node_id);
-        todo!("Key loading implementation")
+        todo!("Load persisted keys from disk")
     }
-    
+
     pub async fn run(&self) -> Result<()> {
-        info!("MPC node {} running", self.config.node_id);
-        
-        // Keep running
-        tokio::signal::ctrl_c().await?;
-        info!("Shutting down...");
-        
-        Ok(())
+        todo!("Run node services (signing, API, etc.)")
     }
 }

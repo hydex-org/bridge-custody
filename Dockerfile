@@ -1,26 +1,36 @@
-FROM rust:1.75 as builder
+FROM rust:latest as builder
 
 WORKDIR /app
 
-# Copy frost-pallas first (dependency)
-COPY frost-pallas /app/frost-pallas
+# Copy both frost-pallas and bridge-custody
+COPY frost-pallas/ ./frost-pallas/
+COPY bridge-custody/ ./bridge-custody/
 
-# Copy bridge-custody
-COPY bridge-custody /app/bridge-custody
-
+# Set working directory to bridge-custody
 WORKDIR /app/bridge-custody
 
-# Build the project
+# Build in release mode
 RUN cargo build --release
 
-# Runtime image
+# Runtime stage
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y libssl3 ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
+# Copy binary from builder
 COPY --from=builder /app/bridge-custody/target/release/mpc-node /usr/local/bin/mpc-node
-COPY --from=builder /app/bridge-custody/config /config
 
-ENTRYPOINT ["/usr/local/bin/mpc-node"]
+# Create data directory
+RUN mkdir -p /data
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Default command
+CMD ["mpc-node", "--config", "/app/config/node.toml"]

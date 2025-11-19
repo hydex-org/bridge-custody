@@ -1,0 +1,5 @@
+**/target/
+**/.git/
+**/*.log
+.DS_Store
+bridge-custody/data/

@@ -6,15 +6,23 @@ use tracing::{info, debug};
 
 use crate::types::DkgResult;
 use crate::network::NetworkClient;
+use crate::network_http::HttpNetworkClient;
+use crate::ua_builder::BridgeAddressGenerator;
+
+enum NetworkBackend {
+    InMemory(NetworkClient),
+    Http(HttpNetworkClient),
+}
 
 pub struct DkgCoordinator {
     node_id: u16,
     total_nodes: u16,
     threshold: u16,
-    network: NetworkClient,
+    network: NetworkBackend,
 }
 
 impl DkgCoordinator {
+    /// Create coordinator with in-memory network (for tests)
     pub fn new(
         node_id: u16,
         total_nodes: u16,
@@ -25,12 +33,27 @@ impl DkgCoordinator {
             node_id,
             total_nodes,
             threshold,
-            network,
+            network: NetworkBackend::InMemory(network),
+        }
+    }
+
+    /// Create coordinator with HTTP network (for production)
+    pub fn new_with_http(
+        node_id: u16,
+        total_nodes: u16,
+        threshold: u16,
+        client: HttpNetworkClient,
+    ) -> Self {
+        Self {
+            node_id,
+            total_nodes,
+            threshold,
+            network: NetworkBackend::Http(client),
         }
     }
 
     /// Run complete DKG ceremony (3 rounds)
-    pub async fn run_ceremony(&mut self) -> Result<DkgResult> {
+    pub async fn run_ceremony(&mut self, zcash_network: &str) -> Result<DkgResult> {
         info!("🔐 Starting DKG ceremony");
         info!("   Node {}/{} (threshold: {})", self.node_id, self.total_nodes, self.threshold);
 
@@ -41,21 +64,19 @@ impl DkgCoordinator {
         info!("📋 Round 1: Generating commitments...");
         let (round1_secret, round1_package) = self.dkg_round1(my_id)?;
         
-        // Broadcast to other nodes
         let round1_packages = self.exchange_round1_packages(my_id, round1_package).await?;
-        info!("✓ Round 1 complete - received {} packages", round1_packages.len());
+        info!("✓ Round 1 complete - received {} packages from others", round1_packages.len());
 
         // ROUND 2: Generate and distribute shares
         info!("📋 Round 2: Distributing secret shares...");
         let (round2_secret, round2_packages) = self.dkg_round2(round1_secret, &round1_packages)?;
         
-        // Exchange round 2 packages
         let my_round2_packages = self.exchange_round2_packages(my_id, round2_packages).await?;
-        info!("✓ Round 2 complete - received {} packages", my_round2_packages.len());
+        info!("✓ Round 2 complete - received {} packages from others", my_round2_packages.len());
 
         // ROUND 3: Finalize keys
         info!("📋 Round 3: Finalizing keys...");
-        let (key_package, public_key_package) = self.dkg_round3(
+        let (_key_package, public_key_package) = self.dkg_round3(
             &round2_secret,
             &round1_packages,
             &my_round2_packages,
@@ -68,8 +89,10 @@ impl DkgCoordinator {
         info!("✅ DKG ceremony successful!");
         info!("   Group key: {}", hex::encode(&vk_bytes));
 
-        // TODO: Generate proper UA from group key
-        let bridge_ua = format!("u1test_PLACEHOLDER_{}", hex::encode(&vk_bytes[..8]));
+        // Generate REAL Zcash Unified Address
+        let bridge_ua = BridgeAddressGenerator::generate_bridge_ua(&vk_bytes, zcash_network)?;
+        
+        info!("🎉 Bridge UA generated: {}", bridge_ua);
 
         Ok(DkgResult {
             node_id: self.node_id,
@@ -79,7 +102,6 @@ impl DkgCoordinator {
         })
     }
 
-    /// DKG Round 1: Generate commitments
     fn dkg_round1(
         &self,
         my_id: Identifier,
@@ -97,7 +119,6 @@ impl DkgCoordinator {
         Ok((secret, package))
     }
 
-    /// DKG Round 2: Process others' commitments and generate shares
     fn dkg_round2(
         &self,
         round1_secret: dkg::round1::SecretPackage,
@@ -109,7 +130,6 @@ impl DkgCoordinator {
         Ok((secret, packages))
     }
 
-    /// DKG Round 3: Finalize with received shares
     fn dkg_round3(
         &self,
         round2_secret: &dkg::round2::SecretPackage,
@@ -126,48 +146,79 @@ impl DkgCoordinator {
         Ok((key_package, public_key_package))
     }
 
-    /// Exchange Round 1 packages with other nodes
     async fn exchange_round1_packages(
         &mut self,
-        my_id: Identifier,
+        _my_id: Identifier,
         my_package: dkg::round1::Package,
     ) -> Result<BTreeMap<Identifier, dkg::round1::Package>> {
-        // Serialize and broadcast
         let serialized = serde_json::to_vec(&my_package)?;
-        self.network.broadcast_round1(self.node_id, serialized).await?;
+        
+        match &self.network {
+            NetworkBackend::InMemory(client) => {
+                client.broadcast_round1(self.node_id, serialized).await?;
+            }
+            NetworkBackend::Http(client) => {
+                client.broadcast_round1(serialized).await?;
+            }
+        }
 
-        // Collect from others
+        debug!("Node {} broadcast Round 1 package", self.node_id);
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
         let mut packages = BTreeMap::new();
-        packages.insert(my_id, my_package); // Include our own
 
         for node_id in 1..=self.total_nodes {
             if node_id == self.node_id {
                 continue;
             }
             
-            let data = self.network.receive_round1(node_id).await?;
+            debug!("Node {} waiting for Round 1 from node {}", self.node_id, node_id);
+            
+            let data = match &self.network {
+                NetworkBackend::InMemory(client) => {
+                    client.receive_round1(node_id).await?
+                }
+                NetworkBackend::Http(client) => {
+                    client.receive_round1(node_id).await?
+                }
+            };
+            
             let package: dkg::round1::Package = serde_json::from_slice(&data)?;
             let id: Identifier = node_id.try_into()?;
             packages.insert(id, package);
+            debug!("Node {} received Round 1 from node {}", self.node_id, node_id);
         }
 
+        debug!("Node {} collected {} Round 1 packages from others", self.node_id, packages.len());
         Ok(packages)
     }
 
-    /// Exchange Round 2 packages with other nodes
     async fn exchange_round2_packages(
         &mut self,
-        my_id: Identifier,
+        _my_id: Identifier,
         my_packages: BTreeMap<Identifier, dkg::round2::Package>,
     ) -> Result<BTreeMap<Identifier, dkg::round2::Package>> {
-        // Send each package to its intended recipient
         for (recipient_id, package) in &my_packages {
             let serialized = serde_json::to_vec(package)?;
-            let recipient_node: u16 = (*recipient_id).into();
-            self.network.send_round2(self.node_id, recipient_node, serialized).await?;
+            let recipient_node: u16 = {
+                let bytes = recipient_id.serialize();
+                u16::from_le_bytes([bytes[0], bytes[1]])
+            };
+            
+            match &self.network {
+                NetworkBackend::InMemory(client) => {
+                    client.send_round2(self.node_id, recipient_node, serialized).await?;
+                }
+                NetworkBackend::Http(client) => {
+                    client.send_round2(recipient_node, serialized).await?;
+                }
+            }
+            
+            debug!("Node {} sent Round 2 to node {}", self.node_id, recipient_node);
         }
 
-        // Receive packages from others
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
         let mut received_packages = BTreeMap::new();
         
         for node_id in 1..=self.total_nodes {
@@ -175,12 +226,24 @@ impl DkgCoordinator {
                 continue;
             }
             
-            let data = self.network.receive_round2(node_id, self.node_id).await?;
+            debug!("Node {} waiting for Round 2 from node {}", self.node_id, node_id);
+            
+            let data = match &self.network {
+                NetworkBackend::InMemory(client) => {
+                    client.receive_round2(node_id, self.node_id).await?
+                }
+                NetworkBackend::Http(client) => {
+                    client.receive_round2(node_id, self.node_id).await?
+                }
+            };
+            
             let package: dkg::round2::Package = serde_json::from_slice(&data)?;
             let id: Identifier = node_id.try_into()?;
             received_packages.insert(id, package);
+            debug!("Node {} received Round 2 from node {}", self.node_id, node_id);
         }
 
+        debug!("Node {} collected {} Round 2 packages from others", self.node_id, received_packages.len());
         Ok(received_packages)
     }
 }
