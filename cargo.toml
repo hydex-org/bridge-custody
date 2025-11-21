@@ -1,0 +1,43 @@
+[package]
+name = "ufvk-scanner"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+# Core
+anyhow = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
+
+# Zcash
+zcash_address = "0.4"
+zcash_primitives = "0.15"
+zcash_note_encryption = "0.4"
+orchard = "0.8"
+
+# Cryptography
+pasta_curves = "0.5"
+group = "0.13"
+ff = "0.13"
+blake2b_simd = "1.0"
+chacha20poly1305 = "0.10"
+subtle = "2.4"
+
+# gRPC
+tonic = { version = "0.10", features = ["tls", "tls-roots"] }
+prost = "0.12"
+
+# HTTP
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+hex = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+
+[build-dependencies]
+tonic-build = "0.10"
