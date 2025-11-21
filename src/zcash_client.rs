@@ -240,6 +240,50 @@ impl ZcashRpcClient {
         self.call("z_getoperationresult", params).await
     }
 
+    /// Submit a raw transaction to the network
+    /// Returns the transaction ID (txid) if successful
+    pub async fn send_raw_transaction(&self, tx_hex: String) -> Result<String> {
+        let txid: String = self.call(
+            "sendrawtransaction",
+            vec![serde_json::json!(tx_hex)]
+        ).await?;
+        
+        Ok(txid)
+    }
+
+    /// Get information about a transaction
+    /// If verbose is true (1), returns a JSON object with transaction details
+    /// If verbose is false (0), returns only the raw transaction hex
+    pub async fn get_raw_transaction(
+        &self,
+        txid: &str,
+        verbose: bool,
+    ) -> Result<serde_json::Value> {
+        self.call(
+            "getrawtransaction",
+            vec![
+                serde_json::json!(txid),
+                serde_json::json!(if verbose { 1 } else { 0 }),
+            ]
+        ).await
+    }
+
+    /// Decode a raw transaction hex into a JSON object
+    pub async fn decode_raw_transaction(&self, hex_string: &str) -> Result<serde_json::Value> {
+        self.call(
+            "decoderawtransaction",
+            vec![serde_json::json!(hex_string)]
+        ).await
+    }
+
+    /// Get transaction details from the wallet
+    pub async fn get_transaction(&self, txid: &str) -> Result<serde_json::Value> {
+        self.call(
+            "gettransaction",
+            vec![serde_json::json!(txid)]
+        ).await
+    }
+
     // === List Methods ===
 
     /// List unspent notes
@@ -269,5 +313,30 @@ impl ZcashRpcClient {
 
     pub async fn get_total_balance(&self) -> Result<serde_json::Value> {
         self.call("z_gettotalbalance", vec![]).await
+    }
+    
+    /// Import a viewing key (UFVK) into the wallet
+    /// 
+    /// Parameters:
+    /// - viewing_key: The Unified Full Viewing Key (UFVK) string
+    /// - rescan: Optional rescan height (None = rescan from wallet birthday)
+    /// - start_height: Optional start height for rescan
+    pub async fn z_importviewingkey(
+        &self,
+        viewing_key: &str,
+        rescan: Option<u32>,
+        start_height: Option<u32>,
+    ) -> Result<serde_json::Value> {
+        let mut params = vec![serde_json::json!(viewing_key)];
+        
+        if let Some(height) = rescan {
+            params.push(serde_json::json!(height));
+        }
+        
+        if let Some(start) = start_height {
+            params.push(serde_json::json!(start));
+        }
+        
+        self.call("z_importviewingkey", params).await
     }
 }

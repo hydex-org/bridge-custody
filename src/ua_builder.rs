@@ -41,7 +41,7 @@ impl BridgeAddressGenerator {
     /// The spending key is derived from the PUBLIC group verifying key,
     /// making funds theoretically vulnerable. This is acceptable for testnet
     /// development but MUST be replaced with proper key derivation for mainnet.
-    fn frost_key_to_orchard_sk(frost_key: &[u8]) -> Result<SpendingKey> {
+    pub fn frost_key_to_orchard_sk(frost_key: &[u8]) -> Result<SpendingKey> {
         if frost_key.len() != 32 {
             anyhow::bail!("FROST key must be 32 bytes, got {}", frost_key.len());
         }
@@ -58,36 +58,41 @@ impl BridgeAddressGenerator {
         Ok(sk)
     }
 
-    /// Derive Orchard Full Viewing Key for Arcium Enclave
+    /// Derive ZIP 316-compliant Unified Full Viewing Key (UFVK)
     /// 
-    /// Returns the Orchard FVK encoded as hex with network prefix.
-    /// This can be used by the Arcium Enclave for scanning Zcash blocks.
-    /// 
-    /// Note: For full ZIP 316 UFVK compliance (uviewtest... format),
-    /// we would need to implement manual F4Jumble + Bech32m encoding
-    /// or use a newer version of zcash_keys with better API support.
+    /// Uses the zcash_address crate's low-level API for proper encoding
     pub fn derive_ufvk_encoded(
         frost_group_key: &[u8],
         network: &str,
     ) -> Result<String> {
+        use zcash_address::{
+            unified::{self, Encoding},
+            Network,
+        };
+        
         // Get Orchard FVK
         let sk = Self::frost_key_to_orchard_sk(frost_group_key)?;
         let orchard_fvk = FullViewingKey::from(&sk);
         
-        // Encode FVK bytes as hex
+        // Get FVK bytes
         let fvk_bytes = orchard_fvk.to_bytes();
         
-        // Add network prefix for clarity
-        let prefix = match network {
-            "mainnet" => "orchard-fvk-main",
-            "testnet" => "orchard-fvk-test",
+        // Determine network
+        let zcash_network = match network {
+            "mainnet" => Network::Main,
+            "testnet" => Network::Test,
             _ => anyhow::bail!("Invalid network: {}", network),
         };
         
-        // Return hex-encoded FVK with prefix
-        // Format: "orchard-fvk-test:hexbytes..."
-        // The Enclave can parse this and use the hex bytes for scanning
-        Ok(format!("{}:{}", prefix, hex::encode(&fvk_bytes)))
+        // Create a unified container with the Orchard FVK
+        let items = vec![unified::Fvk::Orchard(fvk_bytes)];
+        let ufvk = unified::Ufvk::try_from_items(items)
+            .map_err(|e| anyhow::anyhow!("Failed to create UFVK: {:?}", e))?;
+        
+        // Encode it
+        let encoded = ufvk.encode(&zcash_network);
+        
+        Ok(encoded)
     }
 
     /// Derive raw Orchard Full Viewing Key (for internal use)
@@ -131,27 +136,33 @@ mod tests {
     }
 
     #[test]
-    fn test_ufvk_encoding() {
+    fn test_ufvk_encoding_with_official_crate() {
         let frost_key = [0x42u8; 32];
         
-        // Test testnet FVK encoding
-        let fvk_testnet = BridgeAddressGenerator::derive_ufvk_encoded(&frost_key, "testnet")
-            .expect("Should derive testnet FVK");
+        // Test testnet UFVK encoding
+        let ufvk_testnet = BridgeAddressGenerator::derive_ufvk_encoded(&frost_key, "testnet")
+            .expect("Should derive testnet UFVK");
         
-        // Verify it has the correct prefix
+        // Verify it has the correct ZIP 316 prefix
         assert!(
-            fvk_testnet.starts_with("orchard-fvk-test:"),
-            "Testnet FVK should start with 'orchard-fvk-test:', got: {}",
-            fvk_testnet
+            ufvk_testnet.starts_with("uviewtest1"),
+            "Testnet UFVK should start with uviewtest1, got: {}",
+            ufvk_testnet
         );
         
-        println!("Testnet FVK: {}", fvk_testnet);
+        println!("✅ Testnet UFVK: {}", ufvk_testnet);
         
-        // Verify hex portion is valid
-        let hex_part = fvk_testnet.split(':').nth(1).unwrap();
+        // Test mainnet UFVK encoding
+        let ufvk_mainnet = BridgeAddressGenerator::derive_ufvk_encoded(&frost_key, "mainnet")
+            .expect("Should derive mainnet UFVK");
+        
+        // Verify mainnet prefix
         assert!(
-            hex_part.len() > 0 && hex_part.chars().all(|c| c.is_ascii_hexdigit()),
-            "FVK hex should be valid hex"
+            ufvk_mainnet.starts_with("uview1"),
+            "Mainnet UFVK should start with uview1, got: {}",
+            ufvk_mainnet
         );
+        
+        println!("✅ Mainnet UFVK: {}", ufvk_mainnet);
     }
 }

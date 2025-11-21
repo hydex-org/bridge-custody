@@ -1,336 +1,492 @@
 use anyhow::Result;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
-    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose, Engine as _};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
-use tracing::{info, debug, warn};
-use base64::{Engine as _, engine::general_purpose};
+use tracing::{debug, info};
 
-/// HTTP-based network for distributed DKG
 #[derive(Clone)]
 pub struct HttpNetworkClient {
+    client: Client,
     node_id: u16,
-    peers: HashMap<u16, String>, // node_id -> http://host:port
-    client: reqwest::Client,
+    peers: HashMap<u16, String>,
 }
 
 impl HttpNetworkClient {
     pub fn new(node_id: u16, peers: HashMap<u16, String>) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
         Self {
+            client,
             node_id,
             peers,
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
         }
     }
 
-    /// Broadcast Round 1 package to ALL nodes (including self via localhost)
+    /// Broadcast Round 1 DKG packages
     pub async fn broadcast_round1(&self, data: Vec<u8>) -> Result<()> {
         let payload = DkgMessage {
             from_node: self.node_id,
             data: general_purpose::STANDARD.encode(&data),
         };
 
-        // CRITICAL: Store on our own server FIRST (via localhost)
+        // CRITICAL: Store on our own server FIRST
         let self_url = "http://localhost:8080/api/dkg/round1";
-        debug!("Node {} storing its own Round 1 package locally", self.node_id);
-        
-        match self.client.post(self_url).json(&payload).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                debug!("✓ Node {} stored its own Round 1 package", self.node_id);
-            }
-            Ok(resp) => {
-                anyhow::bail!("Node {} failed to store its own package: status {}", self.node_id, resp.status());
-            }
-            Err(e) => {
-                anyhow::bail!("Node {} failed to store its own package: {}", self.node_id, e);
+        for attempt in 0..5 {
+            match self.client.post(self_url).json(&payload).send().await {
+                Ok(_) => break,
+                Err(_) if attempt < 4 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                }
+                Err(e) => anyhow::bail!("Failed to store Round 1 locally: {}", e),
             }
         }
 
         // Then broadcast to peers
         for (peer_id, peer_addr) in &self.peers {
             let url = format!("{}/api/dkg/round1", peer_addr);
-            debug!("Node {} sending Round 1 to node {} at {}", self.node_id, peer_id, url);
-            
-            let mut attempts = 0;
-            loop {
+            for attempt in 0..5 {
                 match self.client.post(&url).json(&payload).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        debug!("✓ Node {} successfully sent Round 1 to node {}", self.node_id, peer_id);
+                    Ok(_) => {
+                        debug!("Sent Round 1 to node {}", peer_id);
                         break;
                     }
-                    Ok(resp) => {
-                        warn!("Node {} received error from node {}: {}", self.node_id, peer_id, resp.status());
+                    Err(_) if attempt < 4 => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
                     }
-                    Err(e) => {
-                        warn!("Node {} failed to send to node {}: {}", self.node_id, peer_id, e);
-                    }
+                    Err(e) => debug!("Failed to send to node {}: {}", peer_id, e),
                 }
-                
-                attempts += 1;
-                if attempts >= 5 {
-                    anyhow::bail!("Failed to send Round 1 to node {} after 5 attempts", peer_id);
-                }
-                
-                sleep(Duration::from_millis(500 * attempts)).await;
             }
         }
-
         Ok(())
     }
 
-    /// Receive Round 1 package from specific peer
+    /// Receive Round 1 packages from all peers
     pub async fn receive_round1(&self, from_node: u16) -> Result<Vec<u8>> {
-        // Query the peer's server for their package
-        let peer_addr = self.peers.get(&from_node)
-            .ok_or_else(|| anyhow::anyhow!("Peer {} not found", from_node))?;
-        
-        let url = format!("{}/api/dkg/round1/{}", peer_addr, from_node);
-        
-        for attempt in 0..100 {
+        // Determine which server to query
+        let url = if from_node == self.node_id {
+            format!("http://localhost:8080/api/dkg/round1/{}", from_node)
+        } else {
+            let peer_addr = self
+                .peers
+                .get(&from_node)
+                .ok_or_else(|| anyhow::anyhow!("Unknown peer: {}", from_node))?;
+            format!("{}/api/dkg/round1/{}", peer_addr, from_node)
+        };
+
+        // Poll with retries
+        for attempt in 0..30 {
             match self.client.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     let msg: DkgMessage = resp.json().await?;
-                    let data = general_purpose::STANDARD.decode(&msg.data)?;
-                    debug!("✓ Node {} received Round 1 from node {}", self.node_id, from_node);
-                    return Ok(data);
+                    let decoded = general_purpose::STANDARD.decode(&msg.data)?;
+                    return Ok(decoded);
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
-                    // Not ready yet, keep polling
+                    if attempt < 29 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    }
                 }
-                Ok(resp) => {
-                    warn!("Unexpected status from node {}: {}", from_node, resp.status());
+                _ if attempt < 29 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await
                 }
-                Err(e) => {
-                    debug!("Attempt {} to get Round 1 from node {}: {}", attempt + 1, from_node, e);
-                }
-            }
-            
-            if attempt < 99 {
-                sleep(Duration::from_millis(200)).await;
+                _ => anyhow::bail!("Timeout waiting for Round 1 from node {}", from_node),
             }
         }
-        
-        anyhow::bail!("Timeout waiting for Round 1 from node {}", from_node)
+        anyhow::bail!("Failed to receive Round 1 from node {}", from_node)
     }
 
-   /// Send Round 2 package to specific peer (stores on OUR server for them to retrieve)
-pub async fn send_round2(&self, to_node: u16, data: Vec<u8>) -> Result<()> {
-    let payload = DkgRound2Message {
-        from_node: self.node_id,
-        to_node,
-        data: general_purpose::STANDARD.encode(&data),
-    };
+    /// Send Round 2 package to a specific peer
+    pub async fn send_round2(&self, to_node: u16, data: Vec<u8>) -> Result<()> {
+        let payload = DkgRound2Message {
+            from_node: self.node_id,
+            to_node,
+            data: general_purpose::STANDARD.encode(&data),
+        };
 
-    // CRITICAL: Always store on OUR OWN server (localhost)
-    // The recipient will query our server to get their package
-    let self_url = "http://localhost:8080/api/dkg/round2";
-    
-    debug!("Node {} storing Round 2 package for node {} locally", self.node_id, to_node);
-    
-    for attempt in 0..5 {
-        match self.client.post(self_url).json(&payload).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                debug!("✓ Node {} successfully stored Round 2 for node {}", self.node_id, to_node);
-                return Ok(());
-            }
-            Ok(resp) => {
-                warn!("Attempt {} failed with status {}", attempt + 1, resp.status());
-            }
-            Err(e) => {
-                warn!("Attempt {} failed: {}", attempt + 1, e);
+        // CRITICAL: Always store on OUR OWN server (localhost)
+        let self_url = "http://localhost:8080/api/dkg/round2";
+        for attempt in 0..5 {
+            match self.client.post(self_url).json(&payload).send().await {
+                Ok(_) => return Ok(()),
+                Err(_) if attempt < 4 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                }
+                Err(e) if attempt == 4 => {
+                    debug!("Failed to store Round 2: {}", e);
+                }
+                _ => {}
             }
         }
-        
-        if attempt < 4 {
-            sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
-        }
+
+        anyhow::bail!(
+            "Failed to store Round 2 for node {} after 5 attempts",
+            to_node
+        )
     }
-    
-    anyhow::bail!("Failed to store Round 2 for node {} after 5 attempts", to_node)
-}
-    /// Receive Round 2 package from specific peer
-    pub async fn receive_round2(&self, from_node: u16, to_node: u16) -> Result<Vec<u8>> {
-        let peer_addr = self.peers.get(&from_node)
-            .ok_or_else(|| anyhow::anyhow!("Peer {} not found", from_node))?;
-        
-        let url = format!("{}/api/dkg/round2/{}/{}", peer_addr, from_node, to_node);
-        
-        for attempt in 0..100 {
+
+    /// Receive Round 2 package from a peer
+    pub async fn receive_round2(&self, from_node: u16) -> Result<Vec<u8>> {
+        // Query the sender's server for the package they created for us
+        let url = if from_node == self.node_id {
+            format!(
+                "http://localhost:8080/api/dkg/round2/{}/{}",
+                from_node, self.node_id
+            )
+        } else {
+            let peer_addr = self
+                .peers
+                .get(&from_node)
+                .ok_or_else(|| anyhow::anyhow!("Unknown peer: {}", from_node))?;
+            format!("{}/api/dkg/round2/{}/{}", peer_addr, from_node, self.node_id)
+        };
+
+        for attempt in 0..30 {
             match self.client.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     let msg: DkgRound2Message = resp.json().await?;
-                    let data = general_purpose::STANDARD.decode(&msg.data)?;
-                    debug!("✓ Node {} received Round 2 from node {}", self.node_id, from_node);
-                    return Ok(data);
+                    let decoded = general_purpose::STANDARD.decode(&msg.data)?;
+                    return Ok(decoded);
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
-                    // Not ready yet
+                    if attempt < 29 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    }
                 }
-                Ok(resp) => {
-                    warn!("Unexpected status from node {}: {}", from_node, resp.status());
+                _ if attempt < 29 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await
                 }
-                Err(e) => {
-                    debug!("Attempt {} to get Round 2 from node {}: {}", attempt + 1, from_node, e);
-                }
-            }
-            
-            if attempt < 99 {
-                sleep(Duration::from_millis(200)).await;
+                _ => anyhow::bail!("Timeout waiting for Round 2 from node {}", from_node),
             }
         }
-        
-        anyhow::bail!("Timeout waiting for Round 2 from node {}", from_node)
+        anyhow::bail!("Failed to receive Round 2 from node {}", from_node)
+    }
+
+    /// Broadcast signing commitments (FROST Round 1)
+    pub async fn broadcast_signing_commitments(&self, data: Vec<u8>) -> Result<()> {
+        let payload = DkgMessage {
+            from_node: self.node_id,
+            data: general_purpose::STANDARD.encode(&data),
+        };
+
+        // Store on our own server first
+        let self_url = "http://localhost:8080/api/signing/commitments";
+        for attempt in 0..5 {
+            match self.client.post(self_url).json(&payload).send().await {
+                Ok(_) => break,
+                Err(_) if attempt < 4 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                }
+                Err(e) => anyhow::bail!("Failed to store commitment locally: {}", e),
+            }
+        }
+
+        // Broadcast to peers
+        for (peer_id, peer_addr) in &self.peers {
+            let url = format!("{}/api/signing/commitments", peer_addr);
+            for attempt in 0..5 {
+                match self.client.post(&url).json(&payload).send().await {
+                    Ok(_) => {
+                        debug!("Sent commitment to node {}", peer_id);
+                        break;
+                    }
+                    Err(_) if attempt < 4 => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                    }
+                    Err(e) => debug!("Failed to send commitment to node {}: {}", peer_id, e),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Receive signing commitments from a peer
+    pub async fn receive_signing_commitments(&self, from_node: u16) -> Result<Vec<u8>> {
+        let url = if from_node == self.node_id {
+            format!(
+                "http://localhost:8080/api/signing/commitments/{}",
+                from_node
+            )
+        } else {
+            let peer_addr = self
+                .peers
+                .get(&from_node)
+                .ok_or_else(|| anyhow::anyhow!("Unknown peer: {}", from_node))?;
+            format!("{}/api/signing/commitments/{}", peer_addr, from_node)
+        };
+
+        for attempt in 0..30 {
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let msg: DkgMessage = resp.json().await?;
+                    let decoded = general_purpose::STANDARD.decode(&msg.data)?;
+                    return Ok(decoded);
+                }
+                _ if attempt < 29 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await
+                }
+                _ => anyhow::bail!("Timeout waiting for commitment from node {}", from_node),
+            }
+        }
+        unreachable!()
+    }
+
+    /// Broadcast signature shares (FROST Round 2)
+    pub async fn broadcast_signature_shares(&self, data: Vec<u8>) -> Result<()> {
+        let payload = DkgMessage {
+            from_node: self.node_id,
+            data: general_purpose::STANDARD.encode(&data),
+        };
+
+        // Store on our own server first
+        let self_url = "http://localhost:8080/api/signing/shares";
+        for attempt in 0..5 {
+            match self.client.post(self_url).json(&payload).send().await {
+                Ok(_) => break,
+                Err(_) if attempt < 4 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                }
+                Err(e) => anyhow::bail!("Failed to store share locally: {}", e),
+            }
+        }
+
+        // Broadcast to peers
+        for (peer_id, peer_addr) in &self.peers {
+            let url = format!("{}/api/signing/shares", peer_addr);
+            for attempt in 0..5 {
+                match self.client.post(&url).json(&payload).send().await {
+                    Ok(_) => {
+                        debug!("Sent signature share to node {}", peer_id);
+                        break;
+                    }
+                    Err(_) if attempt < 4 => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                    }
+                    Err(e) => debug!("Failed to send share to node {}: {}", peer_id, e),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Receive signature shares from a peer
+    pub async fn receive_signature_shares(&self, from_node: u16) -> Result<Vec<u8>> {
+        let url = if from_node == self.node_id {
+            format!("http://localhost:8080/api/signing/shares/{}", from_node)
+        } else {
+            let peer_addr = self
+                .peers
+                .get(&from_node)
+                .ok_or_else(|| anyhow::anyhow!("Unknown peer: {}", from_node))?;
+            format!("{}/api/signing/shares/{}", peer_addr, from_node)
+        };
+
+        for attempt in 0..30 {
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let msg: DkgMessage = resp.json().await?;
+                    let decoded = general_purpose::STANDARD.decode(&msg.data)?;
+                    return Ok(decoded);
+                }
+                _ if attempt < 29 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await
+                }
+                _ => anyhow::bail!("Timeout waiting for share from node {}", from_node),
+            }
+        }
+        unreachable!()
     }
 }
 
-/// HTTP server for receiving DKG messages
+// HTTP Server for receiving DKG/Signing messages
 #[derive(Clone)]
 pub struct HttpNetworkServer {
     node_id: u16,
-    storage: Arc<Mutex<ServerStorage>>,
+    round1_packages: Arc<Mutex<HashMap<u16, String>>>,
+    round2_packages: Arc<Mutex<HashMap<(u16, u16), String>>>,
+    commitments: Arc<Mutex<HashMap<u16, String>>>,
+    signature_shares: Arc<Mutex<HashMap<u16, String>>>,
 }
 
-#[derive(Default)]
-struct ServerStorage {
-    round1_messages: HashMap<u16, Vec<u8>>,
-    round2_messages: HashMap<(u16, u16), Vec<u8>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DkgMessage {
-    from_node: u16,
-    data: String, // base64 encoded
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DkgRound2Message {
-    from_node: u16,
-    to_node: u16,
-    data: String, // base64 encoded
-}
-
-#[derive(Debug, Serialize)]
-struct HealthResponse {
-    status: String,
+#[derive(Clone)]
+struct ServerState {
     node_id: u16,
+    round1_packages: Arc<Mutex<HashMap<u16, String>>>,
+    round2_packages: Arc<Mutex<HashMap<(u16, u16), String>>>,
+    commitments: Arc<Mutex<HashMap<u16, String>>>,
+    signature_shares: Arc<Mutex<HashMap<u16, String>>>,
 }
 
 impl HttpNetworkServer {
     pub fn new(node_id: u16) -> Self {
         Self {
             node_id,
-            storage: Arc::new(Mutex::new(ServerStorage::default())),
+            round1_packages: Arc::new(Mutex::new(HashMap::new())),
+            round2_packages: Arc::new(Mutex::new(HashMap::new())),
+            commitments: Arc::new(Mutex::new(HashMap::new())),
+            signature_shares: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn router(&self) -> Router {
-        Router::new()
-            .route("/health", get(health_check))
-            .route("/api/dkg/round1", post(store_round1))
-            .route("/api/dkg/round1/:from", get(get_round1))
-            .route("/api/dkg/round2", post(store_round2))
-            .route("/api/dkg/round2/:from/:to", get(get_round2))
-            .layer(TraceLayer::new_for_http())
-            .with_state(self.clone())
-    }
+    pub async fn serve(self, addr: String) -> Result<()> {
+        let state = ServerState {
+            node_id: self.node_id,
+            round1_packages: self.round1_packages.clone(),
+            round2_packages: self.round2_packages.clone(),
+            commitments: self.commitments.clone(),
+            signature_shares: self.signature_shares.clone(),
+        };
 
-    pub async fn serve(self, listen_addr: String) -> Result<()> {
-        let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
-        info!("🌐 Node {} HTTP server listening on {}", self.node_id, listen_addr);
-        
-        axum::serve(listener, self.router()).await?;
+        let app = Router::new()
+            .route("/health", get(health_check))
+            .route("/api/dkg/round1", post(handle_round1))
+            .route("/api/dkg/round1/:node_id", get(get_round1))
+            .route("/api/dkg/round2", post(handle_round2))
+            .route("/api/dkg/round2/:from/:to", get(get_round2))
+            .route("/api/signing/commitments", post(handle_signing_commitments))
+            .route(
+                "/api/signing/commitments/:node_id",
+                get(get_signing_commitments),
+            )
+            .route("/api/signing/shares", post(handle_signing_shares))
+            .route("/api/signing/shares/:node_id", get(get_signing_shares))
+            .layer(TraceLayer::new_for_http())
+            .with_state(Arc::new(state));
+
+        info!("🌐 HTTP server listening on {}", addr);
+
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        axum::serve(listener, app).await?;
+
         Ok(())
     }
 }
 
-async fn health_check(State(server): State<HttpNetworkServer>) -> impl IntoResponse {
-    Json(HealthResponse {
-        status: "healthy".to_string(),
-        node_id: server.node_id,
-    })
+// Message types
+#[derive(Debug, Serialize, Deserialize)]
+struct DkgMessage {
+    from_node: u16,
+    data: String,
 }
 
-async fn store_round1(
-    State(server): State<HttpNetworkServer>,
-    Json(payload): Json<DkgMessage>,
-) -> impl IntoResponse {
-    let data = match general_purpose::STANDARD.decode(&payload.data) {
-        Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("Invalid base64: {}", e)).into_response(),
-    };
+#[derive(Debug, Serialize, Deserialize)]
+struct DkgRound2Message {
+    from_node: u16,
+    to_node: u16,
+    data: String,
+}
 
-    let mut storage = server.storage.lock().unwrap();
-    storage.round1_messages.insert(payload.from_node, data);
-    
-    debug!("✓ Node {} stored Round 1 from node {}", server.node_id, payload.from_node);
-    StatusCode::OK.into_response()
+// Handler functions
+async fn health_check() -> &'static str {
+    "OK"
+}
+
+async fn handle_round1(
+    State(state): State<Arc<ServerState>>,
+    Json(msg): Json<DkgMessage>,
+) -> axum::http::StatusCode {
+    let mut storage = state.round1_packages.lock().await;
+    storage.insert(msg.from_node, msg.data);
+    axum::http::StatusCode::OK
 }
 
 async fn get_round1(
-    State(server): State<HttpNetworkServer>,
-    Path(from): Path<u16>,
-) -> impl IntoResponse {
-    let storage = server.storage.lock().unwrap();
-    
-    match storage.round1_messages.get(&from) {
-        Some(data) => {
-            let msg = DkgMessage {
-                from_node: from,
-                data: general_purpose::STANDARD.encode(data),
-            };
-            (StatusCode::OK, Json(msg)).into_response()
-        }
-        None => {
-            (StatusCode::NOT_FOUND, "Package not found").into_response()
-        }
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<u16>,
+) -> Result<Json<DkgMessage>, axum::http::StatusCode> {
+    let storage = state.round1_packages.lock().await;
+    if let Some(data) = storage.get(&node_id) {
+        Ok(Json(DkgMessage {
+            from_node: node_id,
+            data: data.clone(),
+        }))
+    } else {
+        Err(axum::http::StatusCode::NOT_FOUND)
     }
 }
 
-async fn store_round2(
-    State(server): State<HttpNetworkServer>,
-    Json(payload): Json<DkgRound2Message>,
-) -> impl IntoResponse {
-    let data = match general_purpose::STANDARD.decode(&payload.data) {
-        Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("Invalid base64: {}", e)).into_response(),
-    };
-
-    let mut storage = server.storage.lock().unwrap();
-    storage.round2_messages.insert((payload.from_node, payload.to_node), data);
-    
-    debug!("✓ Node {} stored Round 2 from node {} to node {}", 
-           server.node_id, payload.from_node, payload.to_node);
-    StatusCode::OK.into_response()
+async fn handle_round2(
+    State(state): State<Arc<ServerState>>,
+    Json(msg): Json<DkgRound2Message>,
+) -> axum::http::StatusCode {
+    let mut storage = state.round2_packages.lock().await;
+    storage.insert((msg.from_node, msg.to_node), msg.data);
+    axum::http::StatusCode::OK
 }
 
 async fn get_round2(
-    State(server): State<HttpNetworkServer>,
+    State(state): State<Arc<ServerState>>,
     Path((from, to)): Path<(u16, u16)>,
-) -> impl IntoResponse {
-    let storage = server.storage.lock().unwrap();
-    
-    match storage.round2_messages.get(&(from, to)) {
-        Some(data) => {
-            let msg = DkgRound2Message {
-                from_node: from,
-                to_node: to,
-                data: general_purpose::STANDARD.encode(data),
-            };
-            (StatusCode::OK, Json(msg)).into_response()
-        }
-        None => {
-            (StatusCode::NOT_FOUND, "Package not found").into_response()
-        }
+) -> Result<Json<DkgRound2Message>, axum::http::StatusCode> {
+    let storage = state.round2_packages.lock().await;
+    if let Some(data) = storage.get(&(from, to)) {
+        Ok(Json(DkgRound2Message {
+            from_node: from,
+            to_node: to,
+            data: data.clone(),
+        }))
+    } else {
+        Err(axum::http::StatusCode::NOT_FOUND)
+    }
+}
+
+// FROST Signing Commitment handlers
+async fn handle_signing_commitments(
+    State(state): State<Arc<ServerState>>,
+    Json(msg): Json<DkgMessage>,
+) -> axum::http::StatusCode {
+    let mut storage = state.commitments.lock().await;
+    storage.insert(msg.from_node, msg.data);
+    axum::http::StatusCode::OK
+}
+
+async fn get_signing_commitments(
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<u16>,
+) -> Result<Json<DkgMessage>, axum::http::StatusCode> {
+    let storage = state.commitments.lock().await;
+    if let Some(data) = storage.get(&node_id) {
+        Ok(Json(DkgMessage {
+            from_node: node_id,
+            data: data.clone(),
+        }))
+    } else {
+        Err(axum::http::StatusCode::NOT_FOUND)
+    }
+}
+
+// FROST Signature Share handlers
+async fn handle_signing_shares(
+    State(state): State<Arc<ServerState>>,
+    Json(msg): Json<DkgMessage>,
+) -> axum::http::StatusCode {
+    let mut storage = state.signature_shares.lock().await;
+    storage.insert(msg.from_node, msg.data);
+    axum::http::StatusCode::OK
+}
+
+async fn get_signing_shares(
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<u16>,
+) -> Result<Json<DkgMessage>, axum::http::StatusCode> {
+    let storage = state.signature_shares.lock().await;
+    if let Some(data) = storage.get(&node_id) {
+        Ok(Json(DkgMessage {
+            from_node: node_id,
+            data: data.clone(),
+        }))
+    } else {
+        Err(axum::http::StatusCode::NOT_FOUND)
     }
 }

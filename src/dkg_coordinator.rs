@@ -1,14 +1,14 @@
 use anyhow::Result;
+use frost_pallas::{self, Identifier};
 use frost_pallas::keys::dkg;
-use frost_pallas::Identifier;
-use std::collections::BTreeMap;
-use tracing::{debug, info};
+use tracing::{debug, info};  // ← Changed from log to tracing
 use rand::thread_rng;
+use std::collections::BTreeMap;
 
 use crate::network::NetworkClient;
 use crate::network_http::HttpNetworkClient;
-use crate::types::DkgResult;
-use crate::ua_builder::BridgeAddressGenerator;
+use crate::types::{DkgResult, FvkContribution};
+use zcash_address::unified::Encoding;  // ← Only import Encoding trait (the others are used elsewhere)
 
 #[derive(Clone)]
 pub enum NetworkBackend {
@@ -53,8 +53,64 @@ impl DkgCoordinator {
     }
 
     pub async fn run_ceremony(&mut self, zcash_network: &str) -> Result<DkgResult> {
-        info!("Starting DKG ceremony for node {}", self.node_id);
+        info!("Starting extended DKG ceremony for node {}", self.node_id);
         
+        // Phase 1: Run FROST DKG
+        info!("Phase 1: FROST DKG");
+        let (key_package, public_key_package) = self.run_frost_dkg().await?;
+        
+        // Get FROST group verifying key (needed for shared rivk)
+        let vk_bytes = public_key_package.verifying_key().serialize()?;
+        
+        // Phase 2: Derive Orchard key shards from FROST secret
+        info!("Phase 2: Deriving Orchard key shards");
+        let frost_share_bytes = key_package.signing_share().serialize();
+        let orchard_shards = crate::orchard_frost::derive_orchard_shards_from_frost(
+            &frost_share_bytes,
+            &vk_bytes,  // ← PASS GROUP PUBLIC KEY
+            self.node_id,
+        )?;
+        
+        // Phase 3: Compute and exchange FVK contributions
+        info!("Phase 3: Computing FVK contributions");
+        let our_contribution = crate::orchard_frost::compute_fvk_contribution(&orchard_shards)?;
+        
+        info!("Phase 4: Exchanging FVK contributions");
+        let all_contributions = self.exchange_fvk_contributions(our_contribution).await?;
+        
+        // Phase 5: Aggregate FVK contributions
+        info!("Phase 5: Aggregating Full Viewing Key");
+        let full_viewing_key = crate::orchard_frost::aggregate_fvk_contributions(
+            &all_contributions,
+            &orchard_shards.rivk,
+        )?;
+        
+        // Phase 6: Generate UA and UFVK
+        info!("Phase 6: Generating bridge address");
+        let bridge_ua = self.generate_ua_from_fvk(&full_viewing_key, zcash_network)?;
+        let ufvk_encoded = self.encode_ufvk_from_fvk(&full_viewing_key, zcash_network)?;
+        
+        let vk_bytes = public_key_package.verifying_key().serialize()?;
+        
+        info!("✅ DKG ceremony successful!");
+        info!("   Group key: {}", hex::encode(&vk_bytes));
+        info!("🎉 Bridge UA: {}", bridge_ua);
+        info!("👁️  UFVK: {}", ufvk_encoded);
+        
+        Ok(DkgResult {
+            node_id: self.node_id,
+            key_share: vec![], // TODO: Serialize key_package properly
+            group_verifying_key: vk_bytes,
+            orchard_shards,
+            bridge_ua,
+            full_viewing_key: ufvk_encoded,
+        })
+    }
+
+    /// Run the FROST DKG ceremony (3 rounds)
+    async fn run_frost_dkg(
+        &mut self,
+    ) -> Result<(frost_pallas::keys::KeyPackage, frost_pallas::keys::PublicKeyPackage)> {
         let my_id: Identifier = self.node_id.try_into()?;
         
         // Round 1: Generate and exchange commitments
@@ -69,35 +125,15 @@ impl DkgCoordinator {
         
         // Round 3: Finalize key shares
         info!("Round 3: Finalizing key shares");
-        let (_key_package, public_key_package) = self.dkg_round3(
+        let (key_package, public_key_package) = self.dkg_round3(
             &round2_secret,
             &round1_packages,
             &round2_packages,
         )?;
-
-        let group_vk = public_key_package.verifying_key();
-        let vk_bytes = group_vk.serialize()?;
         
-        info!("✓ Round 3 complete!");
-
-        // Generate REAL Zcash Unified Address
-        let bridge_ua = BridgeAddressGenerator::generate_bridge_ua(&vk_bytes, zcash_network)?;
-
-        // Derive Orchard Full Viewing Key for Enclave
-        let ufvk_encoded = BridgeAddressGenerator::derive_ufvk_encoded(&vk_bytes, zcash_network)?;
-
-        info!("✅ DKG ceremony successful!");
-        info!("   Group key: {}", hex::encode(&vk_bytes));
-        info!("🎉 Bridge UA: {}", bridge_ua);
-        info!("👁️  FVK (Orchard): {}", ufvk_encoded);
-
-        Ok(DkgResult {
-            node_id: self.node_id,
-            key_share: vec![], // TODO: Serialize key_package
-            group_verifying_key: vk_bytes,
-            bridge_ua,
-            full_viewing_key: ufvk_encoded,
-        })
+        info!("✓ FROST DKG complete!");
+        
+        Ok((key_package, public_key_package))
     }
 
     fn dkg_round1(
@@ -134,14 +170,14 @@ impl DkgCoordinator {
         round1_packages: &BTreeMap<Identifier, dkg::round1::Package>,
         round2_packages: &BTreeMap<Identifier, dkg::round2::Package>,
     ) -> Result<(frost_pallas::keys::KeyPackage, frost_pallas::keys::PublicKeyPackage)> {
-        let (_key_package, public_key_package) = dkg::part3(
+        let (key_package, public_key_package) = dkg::part3(
             round2_secret,
             round1_packages,
             round2_packages,
         )?;
         
         debug!("Round 3: Key finalized");
-        Ok((_key_package, public_key_package))
+        Ok((key_package, public_key_package))
     }
 
     async fn exchange_round1_packages(
@@ -231,7 +267,7 @@ impl DkgCoordinator {
                     client.receive_round2(node_id, self.node_id).await?
                 }
                 NetworkBackend::Http(client) => {
-                    client.receive_round2(node_id, self.node_id).await?
+                    client.receive_round2(node_id).await?
                 }
             };
             
@@ -243,5 +279,96 @@ impl DkgCoordinator {
 
         debug!("Node {} collected {} Round 2 packages from others", self.node_id, received_packages.len());
         Ok(received_packages)
+    }
+
+    /// Exchange FVK contributions (similar to round1 but for Orchard keys)
+    async fn exchange_fvk_contributions(
+        &mut self,
+        our_contribution: FvkContribution,
+    ) -> Result<Vec<FvkContribution>> {
+        let serialized = serde_json::to_vec(&our_contribution)?;
+        
+        // Broadcast our contribution
+        match &self.network {
+            NetworkBackend::InMemory(client) => {
+                client.broadcast_round1(self.node_id, serialized).await?;
+            }
+            NetworkBackend::Http(client) => {
+                client.broadcast_round1(serialized).await?;
+            }
+        }
+
+        debug!("Node {} broadcast FVK contribution", self.node_id);
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let mut contributions = vec![our_contribution];
+
+        // Collect from all other nodes
+        for node_id in 1..=self.total_nodes {
+            if node_id == self.node_id {
+                continue;
+            }
+            
+            debug!("Node {} waiting for FVK contribution from node {}", self.node_id, node_id);
+            
+            let data = match &self.network {
+                NetworkBackend::InMemory(client) => {
+                    client.receive_round1(node_id).await?
+                }
+                NetworkBackend::Http(client) => {
+                    client.receive_round1(node_id).await?
+                }
+            };
+            
+            let contribution: FvkContribution = serde_json::from_slice(&data)?;
+            contributions.push(contribution);
+            debug!("Node {} received FVK contribution from node {}", self.node_id, node_id);
+        }
+
+        debug!("Node {} collected {} FVK contributions", self.node_id, contributions.len());
+        Ok(contributions)
+    }
+
+    /// Generate Unified Address from aggregated Full Viewing Key
+    fn generate_ua_from_fvk(
+        &self,
+        fvk: &orchard::keys::FullViewingKey,
+        network: &str,
+    ) -> Result<String> {
+        use zcash_address::{unified::{Address, Receiver}, Network};
+        
+        let zcash_network = match network {
+            "mainnet" => Network::Main,
+            "testnet" => Network::Test,
+            _ => anyhow::bail!("Invalid network: {}", network),
+        };
+        
+        let orchard_address = fvk.address_at(0u32, orchard::keys::Scope::External);
+        let ua = Address::try_from_items(vec![
+            Receiver::Orchard(orchard_address.to_raw_address_bytes()),
+        ])?;
+        
+        Ok(ua.encode(&zcash_network))
+    }
+
+    /// Encode Unified Full Viewing Key from aggregated FVK
+    fn encode_ufvk_from_fvk(
+        &self,
+        fvk: &orchard::keys::FullViewingKey,
+        network: &str,
+    ) -> Result<String> {
+        use zcash_address::{unified, Network};
+        
+        let zcash_network = match network {
+            "mainnet" => Network::Main,
+            "testnet" => Network::Test,
+            _ => anyhow::bail!("Invalid network: {}", network),
+        };
+        
+        let fvk_bytes = fvk.to_bytes();
+        let items = vec![unified::Fvk::Orchard(fvk_bytes)];
+        let ufvk = unified::Ufvk::try_from_items(items)?;
+        
+        Ok(ufvk.encode(&zcash_network))
     }
 }

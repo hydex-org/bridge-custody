@@ -47,12 +47,62 @@ impl NodeConfig {
     }
 }
 
+/// Orchard key shards derived from FROST secret shares
+/// Each node holds these secrets and uses them for threshold signing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchardKeyShards {
+    /// Our share of the Orchard spend authorizing key (SECRET)
+    #[serde(with = "serde_bytes")]
+    pub ask_share: Vec<u8>,  // 32 bytes, serialized scalar
+    
+    /// Our share of the Orchard nullifier deriving key (SECRET)
+    #[serde(with = "serde_bytes")]
+    pub nsk_share: Vec<u8>,  // 32 bytes, serialized scalar
+    
+    /// Shared rivk for IVK derivation (public, same for all nodes)
+    #[serde(with = "serde_bytes")]
+    pub rivk: Vec<u8>,       // 32 bytes, serialized scalar
+    
+    /// Node ID that owns this shard
+    pub node_id: u16,
+}
+
+/// Contribution to the Full Viewing Key computation
+/// These are PUBLIC key points that can be safely shared
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FvkContribution {
+    /// Contributor's node ID
+    pub node_id: u16,
+    
+    /// Public key point derived from ask_share: ak = [ask]B
+    #[serde(with = "serde_bytes")]
+    pub ak_bytes: Vec<u8>,   // 32 bytes, compressed point
+    
+    /// Public key point derived from nsk_share: nk = [nsk]B
+    #[serde(with = "serde_bytes")]
+    pub nk_bytes: Vec<u8>,   // 32 bytes, compressed point
+}
+
+/// Result of DKG ceremony including both FROST and Orchard keys
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DkgResult {
     pub node_id: u16,
+    
+    /// FROST key share (serialized KeyPackage)
+    #[serde(with = "serde_bytes")]
     pub key_share: Vec<u8>,
+    
+    /// FROST group verifying key (public)
+    #[serde(with = "serde_bytes")]
     pub group_verifying_key: Vec<u8>,
+    
+    /// Orchard key shards (SECRET - store securely!)
+    pub orchard_shards: OrchardKeyShards,
+    
+    /// Bridge's Unified Address
     pub bridge_ua: String,
+    
+    /// Bridge's Unified Full Viewing Key (for enclave)
     pub full_viewing_key: String,
 }
 
