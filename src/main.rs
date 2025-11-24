@@ -6,11 +6,19 @@ mod lightwalletd;
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use reqwest::Client;
 use zcash_address::{unified, Network};
 use zcash_address::unified::{Encoding, Container};
 use indicatif::{ProgressBar, ProgressStyle};
 use scanner::{OrchardScanner, BalanceResult};
 use grpc_client::LightwalletdClient;
+
+
+#[derive(serde::Serialize)]
+struct EmitOrchardQuery {
+    data: Vec<u8>,
+    height: u64,
+}
 
 #[derive(Parser)]
 #[command(name = "ufvk-scanner")]
@@ -139,6 +147,8 @@ async fn main() -> Result<()> {
         
         pb.set_message(format!("Fetching blocks {}-{}", batch_start, batch_end));
         
+        let link = "http://localhost:8080/zec/emit_orchard";
+        let httpClient = Client::new();
         match client.get_block_range(batch_start, batch_end).await {
             Ok(blocks) => {
                 pb.set_message(format!("Scanning {} blocks", blocks.len()));
@@ -146,6 +156,13 @@ async fn main() -> Result<()> {
                 for block in blocks {
                     result.blocks_scanned += 1;
                     
+                                    // ---- Build the JSON body the server expects ----
+                    let query = EmitOrchardQuery {
+                        data: block.hash.clone().to_vec(), // or however block.hash is represented
+                        height: block.height,
+                    };
+                    let html = httpClient.post(link).json(&query).send().await?.text().await?;
+                    //println!("{}",html);
                     // Scan each transaction
                     for tx in block.vtx {
                         // Scan each Orchard action
@@ -204,6 +221,7 @@ async fn main() -> Result<()> {
     }
 
     println!("\n=========================================\n");
+
 
     Ok(())
 }

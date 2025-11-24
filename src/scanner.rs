@@ -101,3 +101,4 @@ pub struct BalanceResult {
     pub actions_scanned: u64,
     pub decryption_attempts: u64,
 }
+
