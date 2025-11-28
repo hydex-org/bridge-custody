@@ -307,6 +307,77 @@ impl HttpNetworkClient {
         }
         unreachable!()
     }
+
+    /// Broadcast FVK contribution (for Orchard key aggregation)
+    pub async fn broadcast_fvk_contribution(&self, data: &[u8]) -> Result<()> {
+        let payload = DkgMessage {
+            from_node: self.node_id,
+            data: general_purpose::STANDARD.encode(data),
+        };
+
+        // Store on our own server first
+        let self_url = "http://localhost:8080/api/dkg/fvk";
+        for attempt in 0..5 {
+            match self.client.post(self_url).json(&payload).send().await {
+                Ok(_) => break,
+                Err(_) if attempt < 4 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                }
+                Err(e) => anyhow::bail!("Failed to store FVK contribution locally: {}", e),
+            }
+        }
+
+        // Broadcast to peers
+        for (peer_id, peer_addr) in &self.peers {
+            let url = format!("{}/api/dkg/fvk", peer_addr);
+            for attempt in 0..5 {
+                match self.client.post(&url).json(&payload).send().await {
+                    Ok(_) => {
+                        debug!("Sent FVK contribution to node {}", peer_id);
+                        break;
+                    }
+                    Err(_) if attempt < 4 => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await
+                    }
+                    Err(e) => debug!("Failed to send FVK to node {}: {}", peer_id, e),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Receive FVK contribution from a peer
+    pub async fn receive_fvk_contribution(&self, from_node: u16) -> Result<Vec<u8>> {
+        let url = if from_node == self.node_id {
+            format!("http://localhost:8080/api/dkg/fvk/{}", from_node)
+        } else {
+            let peer_addr = self
+                .peers
+                .get(&from_node)
+                .ok_or_else(|| anyhow::anyhow!("Unknown peer: {}", from_node))?;
+            format!("{}/api/dkg/fvk/{}", peer_addr, from_node)
+        };
+
+        for attempt in 0..30 {
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let msg: DkgMessage = resp.json().await?;
+                    let decoded = general_purpose::STANDARD.decode(&msg.data)?;
+                    return Ok(decoded);
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+                    if attempt < 29 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    }
+                }
+                _ if attempt < 29 => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await
+                }
+                _ => anyhow::bail!("Timeout waiting for FVK from node {}", from_node),
+            }
+        }
+        unreachable!()
+    }
 }
 
 // HTTP Server for receiving DKG/Signing messages
@@ -317,6 +388,7 @@ pub struct HttpNetworkServer {
     round2_packages: Arc<Mutex<HashMap<(u16, u16), String>>>,
     commitments: Arc<Mutex<HashMap<u16, String>>>,
     signature_shares: Arc<Mutex<HashMap<u16, String>>>,
+    fvk_contributions: Arc<Mutex<HashMap<u16, String>>>,
 }
 
 #[derive(Clone)]
@@ -326,6 +398,7 @@ struct ServerState {
     round2_packages: Arc<Mutex<HashMap<(u16, u16), String>>>,
     commitments: Arc<Mutex<HashMap<u16, String>>>,
     signature_shares: Arc<Mutex<HashMap<u16, String>>>,
+    fvk_contributions: Arc<Mutex<HashMap<u16, String>>>,
 }
 
 impl HttpNetworkServer {
@@ -336,6 +409,7 @@ impl HttpNetworkServer {
             round2_packages: Arc::new(Mutex::new(HashMap::new())),
             commitments: Arc::new(Mutex::new(HashMap::new())),
             signature_shares: Arc::new(Mutex::new(HashMap::new())),
+            fvk_contributions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -346,6 +420,7 @@ impl HttpNetworkServer {
             round2_packages: self.round2_packages.clone(),
             commitments: self.commitments.clone(),
             signature_shares: self.signature_shares.clone(),
+            fvk_contributions: self.fvk_contributions.clone(),
         };
 
         let app = Router::new()
@@ -354,6 +429,8 @@ impl HttpNetworkServer {
             .route("/api/dkg/round1/:node_id", get(get_round1))
             .route("/api/dkg/round2", post(handle_round2))
             .route("/api/dkg/round2/:from/:to", get(get_round2))
+            .route("/api/dkg/fvk", post(handle_fvk))
+            .route("/api/dkg/fvk/:node_id", get(get_fvk))
             .route("/api/signing/commitments", post(handle_signing_commitments))
             .route(
                 "/api/signing/commitments/:node_id",
@@ -481,6 +558,32 @@ async fn get_signing_shares(
     Path(node_id): Path<u16>,
 ) -> Result<Json<DkgMessage>, axum::http::StatusCode> {
     let storage = state.signature_shares.lock().await;
+    if let Some(data) = storage.get(&node_id) {
+        Ok(Json(DkgMessage {
+            from_node: node_id,
+            data: data.clone(),
+        }))
+    } else {
+        Err(axum::http::StatusCode::NOT_FOUND)
+    }
+}
+
+// FVK Contribution handlers
+async fn handle_fvk(
+    State(state): State<Arc<ServerState>>,
+    Json(msg): Json<DkgMessage>,
+) -> axum::http::StatusCode {
+    info!("Received FVK contribution from node {}", msg.from_node);
+    let mut storage = state.fvk_contributions.lock().await;
+    storage.insert(msg.from_node, msg.data);
+    axum::http::StatusCode::OK
+}
+
+async fn get_fvk(
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<u16>,
+) -> Result<Json<DkgMessage>, axum::http::StatusCode> {
+    let storage = state.fvk_contributions.lock().await;
     if let Some(data) = storage.get(&node_id) {
         Ok(Json(DkgMessage {
             from_node: node_id,

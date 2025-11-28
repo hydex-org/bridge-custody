@@ -14,6 +14,8 @@ pub struct NetworkClient {
 pub struct NetworkStorage {
     round1_messages: HashMap<u16, Vec<u8>>,
     round2_messages: HashMap<(u16, u16), Vec<u8>>,
+    // For FVK aggregation
+    fvk_contributions: HashMap<u16, Vec<u8>>,
     // For FROST signing
     commitments: HashMap<u16, Vec<u8>>,
     signature_shares: HashMap<u16, Vec<u8>>,
@@ -61,6 +63,26 @@ impl NetworkClient {
             sleep(Duration::from_millis(100)).await;
         }
         anyhow::bail!("Timeout waiting for Round 2 from node {} to {}", from, to)
+    }
+
+    // FVK contribution methods
+    pub async fn broadcast_fvk_contribution(&self, data: &[u8]) -> Result<()> {
+        let mut store = self.storage.lock().unwrap();
+        store.fvk_contributions.insert(self.node_id, data.to_vec());
+        Ok(())
+    }
+
+    pub async fn receive_fvk_contribution(&self, from: u16) -> Result<Vec<u8>> {
+        for _ in 0..100 {
+            {
+                let store = self.storage.lock().unwrap();
+                if let Some(data) = store.fvk_contributions.get(&from) {
+                    return Ok(data.clone());
+                }
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        anyhow::bail!("Timeout waiting for FVK contribution from node {}", from)
     }
 
     // FROST Signing methods

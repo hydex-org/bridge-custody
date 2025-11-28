@@ -104,6 +104,18 @@ pub struct DkgResult {
     
     /// Bridge's Unified Full Viewing Key (for enclave)
     pub full_viewing_key: String,
+    
+    /// Aggregated ak point (for child derivation) - ADD THIS
+    #[serde(with = "serde_bytes")]
+    pub aggregated_ak: Vec<u8>,
+    
+    /// Aggregated nk point (for child derivation) - ADD THIS
+    #[serde(with = "serde_bytes")]
+    pub aggregated_nk: Vec<u8>,
+    
+    /// Shared rivk (for child derivation) - ADD THIS
+    #[serde(with = "serde_bytes")]
+    pub shared_rivk: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
