@@ -59,11 +59,11 @@ path = "src/main.rs"
 
 [[bin]]
 name = "create_test_ufvk"
-path = "create_test_ufvk.rs"
+path = "tests/create_test_ufvk.rs"
 
 [[bin]]
 name = "test_api_server"
-path = "test_api_server.rs"
+path = "tests/test_api_server.rs"
 
 [lib]
 name = "bridge_custody"
