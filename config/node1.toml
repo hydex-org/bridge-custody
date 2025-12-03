@@ -26,6 +26,6 @@ bridge_program_id = "HefTNtytDcQgSQmBpPuwjGipbVcJTMRHnppU9poWRXhD"
 keypair_path = "/data/solana-keypair.json"
 
 [enclave]
-url = "http://zcash-enclave:8081"
+url = "http://host.docker.internal:8089"
 poll_interval_secs = 10
 enabled = true

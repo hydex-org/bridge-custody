@@ -17,7 +17,7 @@ use solana_sdk::{
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-
+use base64::Engine;
 use crate::types::EnclaveAttestation;
 
 /// Solana client using raw JSON-RPC
@@ -208,8 +208,10 @@ impl BridgeSolanaClient {
 
     /// Send a signed transaction
     async fn send_transaction(&self, transaction: &Transaction) -> Result<Signature> {
+        use base64::Engine;
         let tx_bytes = bincode::serialize(transaction)?;
-        let tx_base64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &tx_bytes);
+        let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
+
 
         let params = serde_json::json!([
             tx_base64,
@@ -277,13 +279,8 @@ impl BridgeSolanaClient {
 
         if let Some(result) = response.result {
             if let Some(account) = result.value {
-                if !account.data.is_empty() {
-                    let data = base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &account.data[0]
-                    )?;
-                    return Ok(Some(data));
-                }
+                let data = base64::engine::general_purpose::STANDARD.decode(&account.data[0])?;
+                return Ok(Some(data));
             }
         }
 

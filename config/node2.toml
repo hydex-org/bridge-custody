@@ -7,7 +7,7 @@ node_id = 1
 address = "http://mpc-node1:8080"
 
 [[peers]]
-node_id = 3
+node_id = 2
 address = "http://mpc-node3:8080"
 
 [network]
@@ -26,6 +26,6 @@ bridge_program_id = "HefTNtytDcQgSQmBpPuwjGipbVcJTMRHnppU9poWRXhD"
 keypair_path = "/data/solana-keypair.json"
 
 [enclave]
-url = "http://zcash-enclave:8081"
+url = "http://host.docker.internal:8089"
 poll_interval_secs = 10
-enabled = false
+enabled = true

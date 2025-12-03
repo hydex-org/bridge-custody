@@ -4,6 +4,7 @@ use bridge_custody::attestation_service::{AttestationService, AttestationService
 use clap::Parser;
 use std::collections::HashMap;
 use std::time::Duration;
+use bridge_custody::enclave_client::EnclaveClient;
 
 #[derive(Parser, Debug)]
 #[clap(name = "mpc-node")]
@@ -117,7 +118,7 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
     // =========================================================================
     if config.enclave.enabled {
         println!("Provisioning enclave with UFVK...");
-        let enclave_client = crate::enclave_client::EnclaveClient::new(&config.enclave.url);
+        let enclave_client = EnclaveClient::new(&config.enclave.url);
         
         match enclave_client.provision(&_result.full_viewing_key, &_result.bridge_ua).await {
             Ok(resp) => {
@@ -185,54 +186,41 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
     Ok(())
 }
 
-async fn start_api_server(node_id: u16, _config: types::NodeConfig) -> Result<()> {
+async fn start_api_server(node_id: u16, config: types::NodeConfig) -> Result<()> {
     use axum::{
         Router,
-        routing::{get, post},
+        routing::get,
         extract::Json,
-        http::StatusCode,
     };
-    use bridge_custody::{types::DkgResult, address_manager::AddressManager};
-    use serde::{Deserialize, Serialize};
+    use bridge_custody::types::DkgResult;
+    use serde::Serialize;
     use std::sync::Arc;
+    
+    // =========================================================================
+    // MPC NODE API
+    // 
+    // Per Hydex spec, MPC nodes should ONLY handle:
+    // - Bridge info (public)
+    // - Withdrawal signing (FROST)
+    // 
+    // Address generation is handled by the ENCLAVE (TEE), not here.
+    // =========================================================================
     
     // API Response Types
     #[derive(Serialize)]
-    struct BridgeAddressResponse {
+    struct BridgeInfoResponse {
         unified_address: String,
-        ufvk: String,
         network: String,
+        enclave_url: String,
         info: String,
     }
     
-    #[derive(Deserialize)]
-    struct DepositAddressRequest {
-        solana_pubkey: String,
-    }
-    
     #[derive(Serialize)]
-    struct DepositAddressResponse {
-        deposit_address: String,
-        diversifier_index: u32,
-        solana_pubkey: String,
-        network: String,
-        ufvk: String,
+    struct NodeStatusResponse {
+        node_id: u16,
+        status: String,
+        enclave_url: String,
         note: String,
-    }
-    
-    #[derive(Serialize)]
-    struct AddressListItem {
-        solana_pubkey: String,
-        diversifier_index: u32,
-        zcash_address: String,
-    }
-    
-    #[derive(Serialize)]
-    struct ListAddressesResponse {
-        total_addresses: usize,
-        addresses: Vec<AddressListItem>,
-        ufvk: String,
-        network: String,
     }
     
     // Load DKG result once (try both /data and data/ paths)
@@ -255,105 +243,54 @@ async fn start_api_server(node_id: u16, _config: types::NodeConfig) -> Result<()
     };
     
     let dkg_result = Arc::new(dkg_result);
+    let enclave_url = config.enclave.url.clone();
     
-    // Initialize AddressManager with the UFVK
-    let address_manager = Arc::new(
-        AddressManager::from_ufvk(&dkg_result.full_viewing_key)
-            .expect("Failed to initialize AddressManager")
-    );
-    
-    // Handler: Get master bridge address and info
+    // Handler: Get bridge info (public)
+    // NOTE: UFVK is NOT exposed here - it's only in the enclave
     let dkg_for_bridge = dkg_result.clone();
-    let get_bridge_address = move || async move {
+    let enclave_for_bridge = enclave_url.clone();
+    let get_bridge_info = move || async move {
         let network = if dkg_for_bridge.bridge_ua.starts_with("utest") {
             "testnet"
         } else {
             "mainnet"
         };
         
-        Json(BridgeAddressResponse {
+        Json(BridgeInfoResponse {
             unified_address: dkg_for_bridge.bridge_ua.clone(),
-            ufvk: dkg_for_bridge.full_viewing_key.clone(),
             network: network.to_string(),
-            info: "This is the master bridge address. Use /api/deposit-address to generate user-specific deposit addresses.".to_string(),
+            enclave_url: enclave_for_bridge.clone(),
+            info: "Master bridge address. For deposit addresses, use the enclave API at /v1/deposit-intents".to_string(),
         })
     };
     
-    // Handler: Generate deposit address (NATIVE Zcash diversification)
-    let manager_for_deposit = address_manager.clone();
-    let dkg_for_deposit = dkg_result.clone();
-    let generate_deposit_address = move |Json(payload): Json<DepositAddressRequest>| async move {
-        // Validate Solana pubkey format (base58 or hex)
-        if payload.solana_pubkey.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, "solana_pubkey cannot be empty".to_string()));
-        }
-        
-        // Generate deposit address using NATIVE Orchard diversification
-        let (deposit_address, div_index) = manager_for_deposit
-            .generate_deposit_address(&payload.solana_pubkey)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate address: {}", e)))?;
-        
-        let network = if dkg_for_deposit.bridge_ua.starts_with("utest") {
-            "testnet"
-        } else {
-            "mainnet"
-        };
-        
-        Ok::<_, (StatusCode, String)>(Json(DepositAddressResponse {
-            deposit_address,
-            diversifier_index: div_index,
-            solana_pubkey: payload.solana_pubkey,
-            network: network.to_string(),
-            ufvk: dkg_for_deposit.full_viewing_key.clone(),
-            note: "This address is derived using native Orchard diversification. The enclave can view all deposits with the single UFVK.".to_string(),
-        }))
-    };
-    
-    // Handler: List all generated addresses
-    let manager_for_list = address_manager.clone();
-    let dkg_for_list = dkg_result.clone();
-    let list_all_addresses = move || async move {
-        let mappings = manager_for_list.get_all_mappings();
-        
-        // Convert to a more readable format
-        let addresses: Vec<AddressListItem> = mappings
-            .into_iter()
-            .map(|(solana_pk, (div_idx, zcash_addr))| {
-                AddressListItem {
-                    solana_pubkey: solana_pk,
-                    diversifier_index: div_idx,
-                    zcash_address: zcash_addr,
-                }
-            })
-            .collect();
-        
-        let network = if dkg_for_list.bridge_ua.starts_with("utest") {
-            "testnet"
-        } else {
-            "mainnet"
-        };
-        
-        Json(ListAddressesResponse {
-            total_addresses: addresses.len(),
-            addresses,
-            ufvk: dkg_for_list.full_viewing_key.clone(),
-            network: network.to_string(),
+    // Handler: Node status
+    let enclave_for_status = enclave_url.clone();
+    let get_node_status = move || async move {
+        Json(NodeStatusResponse {
+            node_id,
+            status: "running".to_string(),
+            enclave_url: enclave_for_status.clone(),
+            note: "MPC node for FROST threshold signing. Address generation is handled by the enclave.".to_string(),
         })
     };
     
-    // Build router
+    // Build router - MPC nodes only expose bridge info and status
+    // Address generation endpoints are on the ENCLAVE, not here
     let app = Router::new()
-        .route("/api/bridge-address", get(get_bridge_address))
-        .route("/api/deposit-address", post(generate_deposit_address))
-        .route("/api/list-addresses", get(list_all_addresses));
+        .route("/api/bridge-info", get(get_bridge_info))
+        .route("/api/status", get(get_node_status));
     
     // Start server
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    println!("API server listening on :3000");
+    println!("MPC API server listening on :3000");
     println!("Endpoints:");
-    println!("   GET  /api/bridge-address     - Get master bridge info");
-    println!("   POST /api/deposit-address    - Generate user deposit address");
-    println!("   GET  /api/list-addresses     - List all generated addresses");
+    println!("   GET  /api/bridge-info  - Get master bridge UA (public)");
+    println!("   GET  /api/status       - Node status");
+    println!("");
+    println!("NOTE: Address generation is handled by the ENCLAVE:");
+    println!("   POST {}/v1/deposit-intents   - Create deposit intent", enclave_url);
+    println!("   POST {}/v1/generate-address  - Generate deposit address", enclave_url);
     
     axum::serve(listener, app).await?;
     
