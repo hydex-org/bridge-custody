@@ -1,10 +1,10 @@
-node_id = 1
+node_id = 2
 total_nodes = 3
 threshold = 2
 
 [[peers]]
-node_id = 2
-address = "http://mpc-node2:8080"
+node_id = 1
+address = "http://mpc-node1:8080"
 
 [[peers]]
 node_id = 3
@@ -28,4 +28,4 @@ keypair_path = "/data/solana-keypair.json"
 [enclave]
 url = "http://zcash-enclave:8081"
 poll_interval_secs = 10
-enabled = true
+enabled = false
