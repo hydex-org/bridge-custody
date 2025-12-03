@@ -1,14 +1,14 @@
-node_id = 3
+node_id = 1
 total_nodes = 3
 threshold = 2
 
 [[peers]]
-node_id = 1
-address = "http://mpc-node1:8080"
-
-[[peers]]
 node_id = 2
 address = "http://mpc-node2:8080"
+
+[[peers]]
+node_id = 3
+address = "http://mpc-node3:8080"
 
 [network]
 listen_address = "0.0.0.0"
@@ -21,5 +21,11 @@ rpc_password = "zcash"
 network = "testnet"
 
 [solana]
-rpc_url = "http://solana:8899"
-bridge_program_id = "BRIDGExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+rpc_url = "https://api.devnet.solana.com"
+bridge_program_id = "HefTNtytDcQgSQmBpPuwjGipbVcJTMRHnppU9poWRXhD"
+keypair_path = "/data/solana-keypair.json"
+
+[enclave]
+url = "http://zcash-enclave:8081"
+poll_interval_secs = 10
+enabled = true

@@ -21,5 +21,11 @@ rpc_password = "zcash"
 network = "testnet"
 
 [solana]
-rpc_url = "http://solana:8899"
-bridge_program_id = "BRIDGExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+rpc_url = "https://api.devnet.solana.com"
+bridge_program_id = "HefTNtytDcQgSQmBpPuwjGipbVcJTMRHnppU9poWRXhD"
+keypair_path = "/data/solana-keypair.json"
+
+[enclave]
+url = "http://zcash-enclave:8081"
+poll_interval_secs = 10
+enabled = true

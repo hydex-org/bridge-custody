@@ -6,8 +6,12 @@ pub mod network;
 pub mod network_http;
 pub mod zcash_client;
 pub mod ua_builder;
-pub mod solana_listener;
 pub mod tx_builder;
 pub mod api;
 pub mod orchard_frost;
 pub mod address_manager;
+
+// New modules for attestation flow
+pub mod enclave_client;
+pub mod solana_client;
+pub mod attestation_service;

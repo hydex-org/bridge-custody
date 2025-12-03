@@ -1,7 +1,9 @@
 use anyhow::Result;
 use bridge_custody::{dkg_coordinator, network_http, types};
+use bridge_custody::attestation_service::{AttestationService, AttestationServiceConfig};
 use clap::Parser;
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[clap(name = "mpc-node")]
@@ -26,7 +28,7 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = types::NodeConfig::load(&cli.config)?;
     
-    println!("🚀 Starting MPC Node {}", config.node_id);
+    println!("Starting MPC Node {}", config.node_id);
     println!("   Network: {} nodes, threshold {}", config.total_nodes, config.threshold);
     println!("   Zcash: {}", config.zcash.network);
 
@@ -47,39 +49,39 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
     
     tokio::spawn(async move {
         if let Err(e) = server_clone.serve(listen_addr).await {
-            eprintln!("❌ HTTP server error: {}", e);
+            eprintln!("HTTP server error: {}", e);
         }
     });
 
     // Wait for all servers to start (Docker networking overhead)
-    println!("⏳ Waiting for all nodes to start HTTP servers...");
+    println!("Waiting for all nodes to start HTTP servers...");
     tokio::time::sleep(tokio::time::Duration::from_secs(8)).await;
-    println!("✓ Ready to begin DKG");
+    println!("Ready to begin DKG");
 
-        // Build peer map
-        let peers: HashMap<u16, String> = config
+    // Build peer map
+    let peers: HashMap<u16, String> = config
         .peers
         .iter()
         .map(|p| (p.node_id, p.address.clone()))
         .collect();
 
-    // Create HTTP client for multi-node DKG coordination (needed for DKG if no result exists)
+    // Create HTTP client for multi-node DKG coordination
     let http_client = network_http::HttpNetworkClient::new(node_id, peers);
 
     // Check if DKG result already exists
     let dkg_result_path = format!("/data/node{}_dkg_result.json", node_id);
-    let result = if std::path::Path::new(&dkg_result_path).exists() {
+    let _result = if std::path::Path::new(&dkg_result_path).exists() {
         // Load existing DKG result
-        println!("📂 Loading existing DKG result from {}", dkg_result_path);
+        println!("Loading existing DKG result from {}", dkg_result_path);
         let contents = std::fs::read_to_string(&dkg_result_path)?;
         let result: types::DkgResult = serde_json::from_str(&contents)?;
-        println!("✅ Loaded existing key!");
+        println!("Loaded existing key!");
         println!("   Bridge UA: {}", result.bridge_ua);
-        println!("   👁️  UFVK: {}", result.full_viewing_key);
+        println!("   UFVK: {}", result.full_viewing_key);
         result
     } else {
         // Run DKG ceremony for the first time
-        println!("🔐 No existing key found. Running DKG ceremony...");
+        println!("No existing key found. Running DKG ceremony...");
         let mut coordinator = dkg_coordinator::DkgCoordinator::new(
             node_id,
             config.total_nodes,
@@ -89,10 +91,10 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
 
         match coordinator.run_ceremony(&config.zcash.network).await {
             Ok(result) => {
-                println!("✅ DKG Complete!");
+                println!("DKG Complete!");
                 println!("   Bridge UA: {}", result.bridge_ua);
                 println!("   Group Key: {}", hex::encode(&result.group_verifying_key));
-                println!("   👁️  UFVK: {}", result.full_viewing_key);
+                println!("   UFVK: {}", result.full_viewing_key);
                 
                 // Save to disk for future restarts
                 std::fs::create_dir_all("/data")?;
@@ -100,18 +102,65 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
                     &dkg_result_path,
                     serde_json::to_string_pretty(&result)?
                 )?;
-                println!("   💾 Result saved to {}", dkg_result_path);
+                println!("   Result saved to {}", dkg_result_path);
                 result
             }
             Err(e) => {
-                eprintln!("❌ DKG failed: {}", e);
+                eprintln!("DKG failed: {}", e);
                 return Err(e);
             }
         }
     };
 
+    // =========================================================================
+    // START ATTESTATION SERVICE
+    // =========================================================================
+    if config.enclave.enabled {
+        println!("Starting attestation service...");
+        println!("   Enclave URL: {}", config.enclave.url);
+        println!("   Solana RPC: {}", config.solana.rpc_url);
+        println!("   Program ID: {}", config.solana.bridge_program_id);
+        println!("   Poll interval: {}s", config.enclave.poll_interval_secs);
+
+        let attestation_config = AttestationServiceConfig {
+            poll_interval: Duration::from_secs(config.enclave.poll_interval_secs),
+            max_retries: 3,
+            retry_delay: Duration::from_secs(5),
+        };
+
+        let enclave_url = config.enclave.url.clone();
+        let solana_rpc_url = config.solana.rpc_url.clone();
+        let program_id = config.solana.bridge_program_id.clone();
+        let keypair_path = config.solana.keypair_path.clone();
+
+        // Run attestation service in background
+        tokio::spawn(async move {
+            match AttestationService::new(
+                &enclave_url,
+                &solana_rpc_url,
+                &program_id,
+                &keypair_path,
+                attestation_config,
+            ) {
+                Ok(service) => {
+                    println!("Attestation service initialized");
+                    if let Err(e) = service.run().await {
+                        eprintln!("Attestation service error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to create attestation service: {}", e);
+                }
+            }
+        });
+
+        println!("Attestation service started in background");
+    } else {
+        println!("Attestation service disabled (set enclave.enabled = true to enable)");
+    }
+
     // Start REST API server
-    println!("🌐 Starting REST API server on :3000...");
+    println!("Starting REST API server on :3000...");
     start_api_server(node_id, config.clone()).await?;
 
     Ok(())
@@ -281,8 +330,8 @@ async fn start_api_server(node_id: u16, _config: types::NodeConfig) -> Result<()
     
     // Start server
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    println!("✅ API server listening on :3000");
-    println!("📍 Endpoints:");
+    println!("API server listening on :3000");
+    println!("Endpoints:");
     println!("   GET  /api/bridge-address     - Get master bridge info");
     println!("   POST /api/deposit-address    - Generate user deposit address");
     println!("   GET  /api/list-addresses     - List all generated addresses");
@@ -292,82 +341,8 @@ async fn start_api_server(node_id: u16, _config: types::NodeConfig) -> Result<()
     Ok(())
 }
 
-// Tests are commented out - using Docker Compose for multi-node testing instead
 #[cfg(test)]
 #[allow(dead_code)]
 mod tests {
-    /*
-    use super::*;
-    use bridge_custody::{mpc_node::MpcNode, network};
-    
-    #[tokio::test]
-    async fn test_three_node_dkg_ceremony() {
-        println!("🧪 Testing 3-Node DKG Ceremony");
-        println!("================================");
-        
-        // Create shared network storage
-        let network_storage = network::create_shared_network();
-        
-        // Spawn 3 nodes
-        let mut handles = vec![];
-        
-        for node_id in 1..=3 {
-            let storage = network_storage.clone();
-            
-            let handle = tokio::spawn(async move {
-                let config = types::NodeConfig {
-                    node_id,
-                    total_nodes: 3,
-                    threshold: 2,
-                    peers: vec![],
-                    zcash: types::ZcashConfig {
-                        rpc_url: "http://localhost:18232".to_string(),
-                        rpc_user: "test".to_string(),
-                        rpc_password: "test".to_string(),
-                        network: "testnet".to_string(),
-                    },
-                    solana: types::SolanaConfig {
-                        rpc_url: "http://localhost:8899".to_string(),
-                        bridge_program_id: "test".to_string(),
-                    },
-                    network: types::NetworkConfig {
-                        listen_address: "0.0.0.0".to_string(),
-                        port: 8080 + node_id,
-                    },
-                };
-                
-                let mut node = MpcNode::new(config, storage).unwrap();
-                println!("✓ Node {} starting DKG", node_id);
-                
-                let result = node.initialize_with_dkg().await.unwrap();
-                println!("✓ Node {} DKG complete: {}", node_id, result);
-                
-                result
-            });
-            
-            handles.push(handle);
-        }
-        
-        // Wait for all nodes
-        let mut results = vec![];
-        for handle in handles {
-            let result = handle.await.unwrap();
-            results.push(result);
-        }
-        
-        println!("\n✅ All nodes completed DKG");
-        println!("   Node 1 Bridge UA: {}", results[0]);
-        println!("   Node 2 Bridge UA: {}", results[1]);
-        println!("   Node 3 Bridge UA: {}", results[2]);
-        
-        // Verify all nodes generated the same bridge address
-        assert_eq!(results[0], results[1], "Nodes 1 and 2 should have same bridge UA");
-        assert_eq!(results[1], results[2], "Nodes 2 and 3 should have same bridge UA");
-        
-        // Should be testnet address
-        assert!(results[0].starts_with("utest1"), "Should be testnet UA");
-        
-        println!("\n✅ Test PASSED!");
-    }
-    */
+    // Tests commented out - using Docker Compose for multi-node testing
 }

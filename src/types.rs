@@ -11,6 +11,8 @@ pub struct NodeConfig {
     pub zcash: ZcashConfig,
     pub solana: SolanaConfig,
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub enclave: EnclaveConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,12 +33,36 @@ pub struct ZcashConfig {
 pub struct SolanaConfig {
     pub rpc_url: String,
     pub bridge_program_id: String,
+    #[serde(default = "default_keypair_path")]
+    pub keypair_path: String,
+}
+
+fn default_keypair_path() -> String {
+    "/data/solana-keypair.json".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub listen_address: String,
     pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnclaveConfig {
+    #[serde(default = "default_enclave_url")]
+    pub url: String,
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+fn default_enclave_url() -> String {
+    "http://localhost:8081".to_string()
+}
+
+fn default_poll_interval() -> u64 {
+    10
 }
 
 impl NodeConfig {
@@ -105,15 +131,15 @@ pub struct DkgResult {
     /// Bridge's Unified Full Viewing Key (for enclave)
     pub full_viewing_key: String,
     
-    /// Aggregated ak point (for child derivation) - ADD THIS
+    /// Aggregated ak point (for child derivation)
     #[serde(with = "serde_bytes")]
     pub aggregated_ak: Vec<u8>,
     
-    /// Aggregated nk point (for child derivation) - ADD THIS
+    /// Aggregated nk point (for child derivation)
     #[serde(with = "serde_bytes")]
     pub aggregated_nk: Vec<u8>,
     
-    /// Shared rivk (for child derivation) - ADD THIS
+    /// Shared rivk (for child derivation)
     #[serde(with = "serde_bytes")]
     pub shared_rivk: Vec<u8>,
 }
@@ -132,4 +158,99 @@ pub enum SigningStatus {
     InProgress,
     Complete,
     Failed,
+}
+
+// ============================================================================
+// ATTESTATION TYPES (for Enclave <-> Solana flow)
+// ============================================================================
+
+/// Attestation received from enclave (matches enclave's AttestationResponse)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclaveAttestation {
+    pub note_commitment: String,      // hex-encoded 32 bytes
+    pub amount: u64,                  // zatoshis
+    pub recipient_solana: String,     // hex-encoded 32 bytes (Solana pubkey)
+    pub block_height: u64,
+    pub enclave_signature: String,    // hex-encoded 64 bytes
+    pub enclave_pubkey: String,       // hex-encoded 32 bytes
+}
+
+impl EnclaveAttestation {
+    /// Parse note_commitment from hex to bytes
+    pub fn note_commitment_bytes(&self) -> Result<[u8; 32]> {
+        let bytes = hex::decode(&self.note_commitment)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("note_commitment must be 32 bytes");
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    /// Parse recipient_solana from hex to bytes
+    pub fn recipient_solana_bytes(&self) -> Result<[u8; 32]> {
+        let bytes = hex::decode(&self.recipient_solana)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("recipient_solana must be 32 bytes");
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    /// Parse enclave_signature from hex to bytes
+    pub fn enclave_signature_bytes(&self) -> Result<[u8; 64]> {
+        let bytes = hex::decode(&self.enclave_signature)?;
+        if bytes.len() != 64 {
+            anyhow::bail!("enclave_signature must be 64 bytes");
+        }
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    /// Parse enclave_pubkey from hex to bytes
+    pub fn enclave_pubkey_bytes(&self) -> Result<[u8; 32]> {
+        let bytes = hex::decode(&self.enclave_pubkey)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("enclave_pubkey must be 32 bytes");
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    /// Serialize to the 176-byte format expected by Arcium
+    /// Order: note_commitment(32) + amount(8) + recipient(32) + block_height(8) + sig(64) + pubkey(32)
+    pub fn to_attestation_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(176);
+        bytes.extend_from_slice(&self.note_commitment_bytes()?);
+        bytes.extend_from_slice(&self.amount.to_le_bytes());
+        bytes.extend_from_slice(&self.recipient_solana_bytes()?);
+        bytes.extend_from_slice(&self.block_height.to_le_bytes());
+        bytes.extend_from_slice(&self.enclave_signature_bytes()?);
+        bytes.extend_from_slice(&self.enclave_pubkey_bytes()?);
+        Ok(bytes)
+    }
+}
+
+/// Status of an attestation submission
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AttestationStatus {
+    Pending,
+    Submitted,
+    Confirmed,
+    Failed(String),
+}
+
+/// Tracks the state of an attestation through the submission pipeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationRecord {
+    pub attestation: EnclaveAttestation,
+    pub deposit_id: u64,
+    pub status: AttestationStatus,
+    pub solana_signature: Option<String>,
+    pub submitted_at: Option<i64>,
+    pub confirmed_at: Option<i64>,
+    pub error: Option<String>,
 }

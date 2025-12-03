@@ -53,6 +53,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
+# Solana (minimal deps - avoid solana-client's heavy transitive deps)
+solana-sdk = "2.0"
+
 [[bin]]
 name = "mpc-node"
 path = "src/main.rs"
