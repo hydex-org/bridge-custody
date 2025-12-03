@@ -22,7 +22,7 @@ network = "testnet"
 
 [solana]
 rpc_url = "https://api.devnet.solana.com"
-bridge_program_id = "HefTNtytDcQgSQmBpPuwjGipbVcJTMRHnppU9poWRXhD"
+bridge_program_id = "5PLQ9ZSbYq4qfYic3dCwyr1BR8GMVfCKWsbTan2VWE45"
 keypair_path = "/data/solana-keypair.json"
 
 [enclave]
