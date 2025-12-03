@@ -348,8 +348,8 @@ impl BridgeSolanaClient {
         let nonce: u128 = rand::random();
 
         // Build instruction data
-        let discriminator = Self::get_instruction_discriminator("mint_private_with_attestation");
-        
+        let discriminator = Self::get_instruction_discriminator("mint_with_attestation");
+                
         let mut data = Vec::new();
         data.extend_from_slice(&discriminator);
         

@@ -40,6 +40,20 @@ pub struct ScanResultResponse {
     pub attestations: Vec<EnclaveAttestation>,
 }
 
+/// Request for POST /v1/provision
+#[derive(Debug, Serialize)]
+pub struct ProvisionRequest {
+    pub ufvk: String,
+    pub bridge_ua: String,
+}
+
+/// Response from POST /v1/provision
+#[derive(Debug, Deserialize)]
+pub struct ProvisionResponse {
+    pub enclave_pubkey: String,
+    pub status: String,
+}
+
 impl EnclaveClient {
     /// Create a new enclave client
     pub fn new(base_url: &str) -> Self {
@@ -144,6 +158,31 @@ impl EnclaveClient {
         }
 
         let result: ScanResultResponse = response.json().await?;
+        Ok(result)
+    }
+
+    /// Provision the enclave with UFVK from DKG
+    pub async fn provision(&self, ufvk: &str, bridge_ua: &str) -> Result<ProvisionResponse> {
+        let url = format!("{}/v1/provision", self.base_url);
+        let request = ProvisionRequest {
+            ufvk: ufvk.to_string(),
+            bridge_ua: bridge_ua.to_string(),
+        };
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to provision enclave")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Provision failed: {} - {}", status, body);
+        }
+
+        let result: ProvisionResponse = response.json().await?;
         Ok(result)
     }
 }

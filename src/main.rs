@@ -113,6 +113,25 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
     };
 
     // =========================================================================
+    // PROVISION ENCLAVE WITH UFVK
+    // =========================================================================
+    if config.enclave.enabled {
+        println!("Provisioning enclave with UFVK...");
+        let enclave_client = crate::enclave_client::EnclaveClient::new(&config.enclave.url);
+        
+        match enclave_client.provision(&_result.full_viewing_key, &_result.bridge_ua).await {
+            Ok(resp) => {
+                println!("   Enclave provisioned!");
+                println!("   Enclave pubkey: {}", resp.enclave_pubkey);
+            }
+            Err(e) => {
+                // Non-fatal - enclave might already be provisioned
+                println!("   Enclave provision note: {}", e);
+            }
+        }
+    }
+
+    // =========================================================================
     // START ATTESTATION SERVICE
     // =========================================================================
     if config.enclave.enabled {
