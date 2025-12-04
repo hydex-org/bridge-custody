@@ -7,7 +7,7 @@ node_id = 1
 address = "http://mpc-node1:8080"
 
 [[peers]]
-node_id = 2
+node_id = 3
 address = "http://mpc-node3:8080"
 
 [network]
@@ -26,10 +26,10 @@ bridge_program_id = "B12pxSGTH8bt8LtVcdbEXf2CPpf2sFJuj7SctsFuvcQc"
 keypair_path = "/data/solana-keypair.json"
 
 [enclave]
-url = "http://host.docker.internal:8089"
+url = "http://enclave:8089"
 poll_interval_secs = 10
 enabled = true
 
 [bridge_api]
-url = "http://host.docker.internal:3001"
+url = "http://bridge-api:3001"
 api_key = "hydex-internal-key"
