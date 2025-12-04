@@ -15,7 +15,7 @@ services:
       - ./data/node1:/data
     networks:
       mpc-network:
-        ipv4_address: 172.20.0.11
+        ipv4_address: 172.28.0.11
     ports:
       - "3001:3000"
       - "8081:8080"
@@ -40,7 +40,7 @@ services:
       - ./data/node2:/data
     networks:
       mpc-network:
-        ipv4_address: 172.20.0.12
+        ipv4_address: 172.28.0.12
     ports:
       - "3002:3000"
       - "8082:8080"
@@ -67,7 +67,7 @@ services:
       - ./data/node3:/data
     networks:
       mpc-network:
-        ipv4_address: 172.20.0.13
+        ipv4_address: 172.28.0.13
     ports:
       - "3003:3000"
       - "8083:8080"
@@ -86,4 +86,4 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/24
+        - subnet: 172.28.0.0/24
