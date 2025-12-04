@@ -13,6 +13,8 @@ pub struct NodeConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub enclave: EnclaveConfig,
+    #[serde(default)]
+    pub bridge_api: BridgeApiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +65,18 @@ fn default_enclave_url() -> String {
 
 fn default_poll_interval() -> u64 {
     10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BridgeApiConfig {
+    #[serde(default = "default_bridge_api_url")]
+    pub url: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+fn default_bridge_api_url() -> String {
+    "http://localhost:3001".to_string()
 }
 
 impl NodeConfig {

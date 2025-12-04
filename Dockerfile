@@ -1,13 +1,9 @@
-FROM rust:latest as builder
+FROM rust:latest AS builder
 
 WORKDIR /app
 
-# Copy both frost-pallas and bridge-custody
-COPY frost-pallas/ ./frost-pallas/
-COPY bridge-custody/ ./bridge-custody/
-
-# Set working directory to bridge-custody
-WORKDIR /app/bridge-custody
+# Copy everything from bridge-custody (including vendored frost-pallas)
+COPY . .
 
 # Build in release mode
 RUN cargo build --release
@@ -23,7 +19,7 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /app/bridge-custody/target/release/mpc-node /usr/local/bin/mpc-node
+COPY --from=builder /app/target/release/mpc-node /usr/local/bin/mpc-node
 
 # Create data directory
 RUN mkdir -p /data

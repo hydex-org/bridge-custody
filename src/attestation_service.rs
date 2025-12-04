@@ -1,16 +1,20 @@
 //! Attestation Service
 //! 
 //! Continuously polls the enclave for pending attestations
-//! and submits them to the Solana bridge program.
+//! and submits them directly to Solana using mint_simple.
+//!
+//! Flow: Enclave -> MPC Node -> Solana (direct, no Arcium)
 
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::interval;
-
+use solana_sdk::pubkey::Pubkey;
+//use std::str::FromStr;
+//use rand::Rng;
 use crate::enclave_client::EnclaveClient;
-use crate::solana_client::BridgeSolanaClient;
+use crate::solana_client::BridgeSolanaClient as SolanaClient;
 use crate::types::{AttestationRecord, AttestationStatus, EnclaveAttestation};
 
 /// Configuration for the attestation service
@@ -31,17 +35,19 @@ impl Default for AttestationServiceConfig {
     }
 }
 
-/// Service that bridges enclave attestations to Solana
+/// Service that submits enclave attestations directly to Solana
+/// 
+/// Flow: Enclave -> MPC Node -> Solana (mint_simple)
 pub struct AttestationService {
     enclave_client: EnclaveClient,
-    solana_client: Arc<BridgeSolanaClient>,
+    solana_client: Arc<SolanaClient>,
     config: AttestationServiceConfig,
     /// Track in-flight attestations
     pending_submissions: Arc<Mutex<Vec<AttestationRecord>>>,
 }
 
 impl AttestationService {
-    /// Create a new attestation service
+    /// Create a new attestation service (direct Solana submission)
     pub fn new(
         enclave_url: &str,
         solana_rpc_url: &str,
@@ -50,11 +56,11 @@ impl AttestationService {
         config: AttestationServiceConfig,
     ) -> Result<Self> {
         let enclave_client = EnclaveClient::new(enclave_url);
-        let solana_client = BridgeSolanaClient::new(solana_rpc_url, program_id, keypair_path)?;
+        let solana_client = Arc::new(SolanaClient::new(solana_rpc_url, program_id, keypair_path)?);
 
         Ok(Self {
             enclave_client,
-            solana_client: Arc::new(solana_client),
+            solana_client,
             config,
             pending_submissions: Arc::new(Mutex::new(Vec::new())),
         })
@@ -72,6 +78,10 @@ impl AttestationService {
 
         loop {
             poll_timer.tick().await;
+            
+            // Add random jitter (0-5 seconds) to reduce race conditions
+            let jitter = rand::random::<u64>() % 5000;
+            tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
             
             if let Err(e) = self.process_pending_attestations().await {
                 tracing::error!("Error processing attestations: {}", e);
@@ -103,13 +113,15 @@ impl AttestationService {
             tracing::info!("   Enclave provisioned, pubkey: {}...", &status.enclave_pubkey[..16]);
         }
 
-        // Check Solana
+        // Check Solana connection
         tracing::info!("Checking Solana connection...");
-        let balance = self.solana_client.check_balance().await?;
+        match self.solana_client.check_balance().await {            Ok(balance) => {
         tracing::info!("   Solana: OK (payer balance: {} lamports)", balance);
-
-        if balance < 10_000_000 {
-            tracing::warn!("   Low payer balance! Consider funding: {}", self.solana_client.payer_pubkey());
+            }
+            Err(e) => {
+                tracing::error!("   Solana: unreachable - {}", e);
+                anyhow::bail!("Cannot reach Solana: {}", e);
+            }
         }
 
         Ok(())
@@ -147,7 +159,7 @@ impl AttestationService {
         Ok(())
     }
 
-    /// Process a single attestation
+    /// Process a single attestation - submit directly to Solana
     async fn process_single_attestation(&self, attestation: &EnclaveAttestation) -> Result<()> {
         tracing::info!(
             "Processing attestation: amount={} zatoshi, block={}, recipient={}...",
@@ -156,36 +168,29 @@ impl AttestationService {
             &attestation.recipient_solana[..16]
         );
 
-        // 1. Check if note already claimed (prevent double-mint)
-        let note_commitment = attestation.note_commitment_bytes()?;
-        if self.solana_client.is_note_claimed(&note_commitment).await? {
-            tracing::warn!("Note already claimed, marking as submitted");
-            self.enclave_client.mark_attestation_submitted(&attestation.note_commitment).await?;
-            return Ok(());
-        }
+        // Parse the recipient Solana address
+        let pubkey_bytes = hex::decode(&attestation.recipient_solana)
+        .map_err(|e| anyhow::anyhow!("Invalid hex in recipient_solana: {}", e))?;
+    let user_pubkey = Pubkey::try_from(pubkey_bytes.as_slice())
+        .map_err(|e| anyhow::anyhow!("Invalid Solana pubkey bytes: {}", e))?;
 
-        // 2. Parse recipient Solana pubkey
-        let recipient_bytes = attestation.recipient_solana_bytes()?;
-        let recipient = solana_sdk::pubkey::Pubkey::try_from(recipient_bytes.as_slice())?;
+        // TODO: Look up the correct deposit_id from the on-chain state
+        // For now, we're using a placeholder - in production this needs proper lookup
+        let deposit_id = 0u64;
+        tracing::warn!("Using placeholder deposit_id={} - implement proper lookup", deposit_id);
 
-        // 3. Find deposit_id for this recipient
-        // In production, this would query the enclave or a mapping service
-        // For now, we use a placeholder
-        let deposit_id = self.find_deposit_id_for_attestation(attestation).await?;
-
-        // 4. Submit attestation to Solana
-        let result = self.solana_client
-            .submit_attestation(attestation, deposit_id, &recipient)
-            .await;
+        // Submit directly to Solana using mint_simple
+        let result = self.solana_client.submit_attestation(attestation, deposit_id, &user_pubkey).await;
 
         match result {
             Ok(submit_result) => {
                 tracing::info!(
-                    "Attestation submitted successfully: {}",
+                    "Attestation submitted to Solana: deposit_id={}, tx={}",
+                    submit_result.deposit_id,
                     submit_result.signature
                 );
                 
-                // 5. Mark as submitted in enclave
+                // Mark as submitted in enclave
                 self.enclave_client
                     .mark_attestation_submitted(&attestation.note_commitment)
                     .await?;
@@ -193,7 +198,7 @@ impl AttestationService {
                 // Track submission
                 let record = AttestationRecord {
                     attestation: attestation.clone(),
-                    deposit_id,
+                    deposit_id: submit_result.deposit_id,
                     status: AttestationStatus::Submitted,
                     solana_signature: Some(submit_result.signature),
                     submitted_at: Some(chrono_timestamp()),
@@ -203,12 +208,12 @@ impl AttestationService {
                 self.pending_submissions.lock().await.push(record);
             }
             Err(e) => {
-                tracing::error!("Failed to submit attestation: {}", e);
+                tracing::error!("Failed to submit attestation to Solana: {}", e);
                 
                 // Track failure
                 let record = AttestationRecord {
                     attestation: attestation.clone(),
-                    deposit_id,
+                    deposit_id: 0,
                     status: AttestationStatus::Failed(e.to_string()),
                     solana_signature: None,
                     submitted_at: None,
@@ -222,23 +227,6 @@ impl AttestationService {
         }
 
         Ok(())
-    }
-
-    /// Find the deposit_id associated with an attestation
-    /// 
-    /// This requires querying the enclave's UA -> deposit_id mapping
-    /// or matching by recipient_solana pubkey
-    async fn find_deposit_id_for_attestation(&self, attestation: &EnclaveAttestation) -> Result<u64> {
-        // In a full implementation, this would:
-        // 1. Query enclave for UA -> deposit_id mapping
-        // 2. Or query Solana for DepositIntent by user pubkey
-        // 
-        // For now, we use a placeholder approach:
-        // The deposit_id should be passed along with the attestation from the enclave
-        
-        // TODO: Update enclave API to include deposit_id in attestation response
-        tracing::warn!("Using placeholder deposit_id=0 - implement proper lookup");
-        Ok(0)
     }
 
     /// Get submission statistics

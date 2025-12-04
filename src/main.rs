@@ -140,6 +140,7 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
         println!("   Enclave URL: {}", config.enclave.url);
         println!("   Solana RPC: {}", config.solana.rpc_url);
         println!("   Program ID: {}", config.solana.bridge_program_id);
+        println!("   Keypair: {}", config.solana.keypair_path);
         println!("   Poll interval: {}s", config.enclave.poll_interval_secs);
 
         let attestation_config = AttestationServiceConfig {
@@ -154,6 +155,7 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
         let keypair_path = config.solana.keypair_path.clone();
 
         // Run attestation service in background
+        // Flow: Enclave -> MPC Node -> Solana (direct, no Arcium)
         tokio::spawn(async move {
             match AttestationService::new(
                 &enclave_url,

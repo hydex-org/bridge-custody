@@ -17,7 +17,7 @@ use crate::tx_builder::OrchardTxBuilder;
 use crate::zcash_client::ZcashRpcClient;
 use crate::types::DkgResult;
 // use crate::orchard_frost;  // Commented out - child derivation removed
-use crate::ua_builder::BridgeAddressGenerator;
+// use crate::ua_builder::BridgeAddressGenerator;  
 
 /// Withdrawal request from user
 #[derive(Debug, Deserialize)]

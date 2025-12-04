@@ -315,67 +315,123 @@ impl BridgeSolanaClient {
         )
     }
 
-    /// Submit an attestation to mint private tokens
+    /// Derive sZEC mint PDA
+    pub fn derive_szec_mint_pda(&self) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[b"szec-mint"],
+            &self.program_id,
+        )
+    }
+
+    /// Derive mint authority PDA
+    pub fn derive_mint_authority_pda(&self) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[b"mint-authority"],
+            &self.program_id,
+        )
+    }
+
+    /// Derive associated token address (same as spl_associated_token_account::get_associated_token_address)
+    pub fn derive_associated_token_address(&self, owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+        let token_program_id = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let ata_program_id = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+        
+        let (address, _) = Pubkey::find_program_address(
+            &[
+                owner.as_ref(),
+                token_program_id.as_ref(),
+                mint.as_ref(),
+            ],
+            &ata_program_id,
+        );
+        address
+    }
+
+    /// Submit an attestation to mint tokens using mint_simple (devnet flow)
+    /// Simplified version - just requires MPC authority to sign the transaction
+    /// 
+    /// This function will automatically create a deposit intent if one doesn't exist
     pub async fn submit_attestation(
         &self,
         attestation: &EnclaveAttestation,
-        deposit_id: u64,
+        _deposit_id: u64,  // Ignored - we use ensure_deposit_intent to get/create the right one
         user: &Pubkey,
     ) -> Result<AttestationSubmitResult> {
         tracing::info!(
-            "Submitting attestation for deposit {} (amount: {} zatoshi)",
-            deposit_id,
+            "Submitting attestation for user {} (amount: {} zatoshi)",
+            user,
             attestation.amount
         );
 
-        // Serialize attestation to bytes (176 bytes total)
-        let attestation_bytes = attestation.to_attestation_bytes()?;
+        // Step 1: Ensure deposit intent exists (creates if needed)
+        let actual_deposit_id = match self.ensure_deposit_intent(user).await {
+            Ok(id) => {
+                tracing::info!("Using deposit intent #{} for user {}", id, user);
+                id
+            }
+            Err(e) => {
+                tracing::error!("Failed to ensure deposit intent: {}", e);
+                return Err(e);
+            }
+        };
 
-        // Split into 32-byte chunks for Arcium encryption
-        let mut encrypted_attestation: Vec<[u8; 32]> = Vec::new();
-        for chunk in attestation_bytes.chunks(32) {
-            let mut arr = [0u8; 32];
-            let len = chunk.len().min(32);
-            arr[..len].copy_from_slice(&chunk[..len]);
-            encrypted_attestation.push(arr);
+        // Parse hex-encoded fields from attestation
+        let note_commitment = attestation.note_commitment_bytes()
+            .context("Failed to parse note_commitment")?;
+        let amount = attestation.amount;
+        let block_height = attestation.block_height;
+
+        // Step 2: Check if note already claimed
+        if self.is_note_claimed(&note_commitment).await? {
+            tracing::warn!("Note already claimed, skipping mint");
+            return Ok(AttestationSubmitResult {
+                signature: "already_claimed".to_string(),
+                deposit_id: actual_deposit_id,
+                success: false,
+            });
         }
 
-        // Placeholder encryption params (set by MXE in production)
-        let pub_key = [0u8; 32];
-        let nonce: u128 = rand::random();
-
-        // Build instruction data
-        let discriminator = Self::get_instruction_discriminator("mint_with_attestation");
+        // Step 3: Build mint_simple instruction
+        let discriminator = Self::get_instruction_discriminator("mint_simple");
                 
         let mut data = Vec::new();
         data.extend_from_slice(&discriminator);
-        
-        let computation_offset: u64 = 0;
-        data.extend_from_slice(&computation_offset.to_le_bytes());
-        data.extend_from_slice(&deposit_id.to_le_bytes());
-        
-        // Vec<[u8; 32]> with length prefix
-        data.extend_from_slice(&(encrypted_attestation.len() as u32).to_le_bytes());
-        for chunk in &encrypted_attestation {
-            data.extend_from_slice(chunk);
-        }
-        
-        data.extend_from_slice(&pub_key);
-        data.extend_from_slice(&nonce.to_le_bytes());
+        data.extend_from_slice(&note_commitment);                    // 32 bytes
+        data.extend_from_slice(&amount.to_le_bytes());               // 8 bytes
+        data.extend_from_slice(&block_height.to_le_bytes());         // 8 bytes
 
         // Derive PDAs
         let (bridge_config_pda, _) = self.derive_bridge_config_pda();
-        let (deposit_intent_pda, _) = self.derive_deposit_intent_pda(user, deposit_id);
+        let (deposit_intent_pda, _) = self.derive_deposit_intent_pda(user, actual_deposit_id);
+        let (claim_tracker_pda, _) = self.derive_claim_tracker_pda(&note_commitment);
+        let (szec_mint_pda, _) = self.derive_szec_mint_pda();
+        let (mint_authority_pda, _) = self.derive_mint_authority_pda();
+        
+        // Derive user's associated token account
+        let user_token_account = self.derive_associated_token_address(user, &szec_mint_pda);
 
-        // Build accounts
+                // Program IDs
+                let token_program_id = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+                let associated_token_program_id = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+        
+                // Build accounts (must match MintSimple struct order in Solana program)
+                        // Build accounts (must match MintSimple struct order in Solana program)
         let accounts = vec![
-            AccountMeta::new(*user, false),
-            AccountMeta::new_readonly(bridge_config_pda, false),
-            AccountMeta::new(deposit_intent_pda, false),
-            AccountMeta::new(self.payer.pubkey(), true),
+            AccountMeta::new_readonly(self.payer.pubkey(), true), // authority (signer)
+            AccountMeta::new(self.payer.pubkey(), true),          // payer (signer)
+            AccountMeta::new(bridge_config_pda, false),           // bridge_config
+            AccountMeta::new(deposit_intent_pda, false),          // deposit_intent
+            AccountMeta::new(claim_tracker_pda, false),           // claim_tracker
+            AccountMeta::new(szec_mint_pda, false),               // szec_mint
+            AccountMeta::new_readonly(mint_authority_pda, false), // mint_authority
+            AccountMeta::new_readonly(*user, false),              // user_wallet (NEW)
+            AccountMeta::new(user_token_account, false),          // user_token_account
+            AccountMeta::new_readonly(associated_token_program_id, false), // associated_token_program
+            AccountMeta::new_readonly(token_program_id, false),   // token_program
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false), // system_program
         ];
 
-        let instruction = Instruction {
+        let mint_simple_ix = Instruction {
             program_id: self.program_id,
             accounts,
             data,
@@ -384,16 +440,19 @@ impl BridgeSolanaClient {
         // Build and send transaction
         let recent_blockhash = self.get_latest_blockhash().await?;
         
-        let message = Message::new(&[instruction], Some(&self.payer.pubkey()));
+        let message = Message::new(&[mint_simple_ix], Some(&self.payer.pubkey()));
         let mut transaction = Transaction::new_unsigned(message);
         transaction.sign(&[&*self.payer], recent_blockhash);
 
         match self.send_transaction(&transaction).await {
             Ok(signature) => {
-                tracing::info!("Attestation submitted: {}", signature);
+                tracing::info!("Mint successful! TX: {}", signature);
+                tracing::info!("   User: {}", user);
+                tracing::info!("   Amount: {} zatoshi", amount);
+                tracing::info!("   Deposit ID: {}", actual_deposit_id);
                 Ok(AttestationSubmitResult {
                     signature: signature.to_string(),
-                    deposit_id,
+                    deposit_id: actual_deposit_id,
                     success: true,
                 })
             }
@@ -412,6 +471,155 @@ impl BridgeSolanaClient {
             Ok(Some(_)) => Ok(true),   // Account exists = note claimed
             Ok(None) => Ok(false),      // Account doesn't exist = not claimed
             Err(_) => Ok(false),        // Error fetching = assume not claimed
+        }
+    }
+
+    /// Get current deposit nonce from bridge config
+    pub async fn get_deposit_nonce(&self) -> Result<u64> {
+        let (bridge_config_pda, _) = self.derive_bridge_config_pda();
+        
+        let data = self.get_account_data(&bridge_config_pda).await?
+            .ok_or_else(|| anyhow::anyhow!("Bridge config not found"))?;
+        
+        // BridgeConfig layout: discriminator(8) + bump(1) + admin(32) + enclave_authority(32) + 
+        //                      mpc_authority(32) + szec_mint(32) + deposit_nonce(8) + ...
+        // deposit_nonce is at offset 8 + 1 + 32 + 32 + 32 + 32 = 137
+        if data.len() < 145 {
+            anyhow::bail!("Bridge config account data too short");
+        }
+        
+        let nonce_bytes: [u8; 8] = data[137..145].try_into()?;
+        Ok(u64::from_le_bytes(nonce_bytes))
+    }
+
+    /// Check if deposit intent exists for a user
+    pub async fn deposit_intent_exists(&self, user: &Pubkey, deposit_id: u64) -> Result<bool> {
+        let (deposit_intent_pda, _) = self.derive_deposit_intent_pda(user, deposit_id);
+        
+        match self.get_account_data(&deposit_intent_pda).await {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Create a deposit intent for a user using create_deposit_for_user
+    /// This creates the on-chain state needed before minting
+    pub async fn create_deposit_for_user(
+        &self,
+        recipient: &Pubkey,
+        ua_hash: [u8; 32],
+    ) -> Result<u64> {
+        let deposit_nonce = self.get_deposit_nonce().await?;
+        
+        tracing::info!(
+            "Creating deposit intent for user {} (nonce: {})",
+            recipient,
+            deposit_nonce
+        );
+
+        let discriminator = Self::get_instruction_discriminator("create_deposit_for_user");
+        
+        let mut data = Vec::new();
+        data.extend_from_slice(&discriminator);
+        data.extend_from_slice(recipient.as_ref());  // recipient: Pubkey (32 bytes)
+        data.extend_from_slice(&ua_hash);            // ua_hash: [u8; 32]
+
+        // Derive PDAs
+        let (bridge_config_pda, _) = self.derive_bridge_config_pda();
+        let (deposit_intent_pda, _) = self.derive_deposit_intent_pda(recipient, deposit_nonce);
+
+        // Build accounts (must match CreateDepositForUser struct)
+        let accounts = vec![
+            AccountMeta::new_readonly(self.payer.pubkey(), true), // authority (signer)
+            AccountMeta::new(self.payer.pubkey(), true),          // payer (signer)
+            AccountMeta::new(bridge_config_pda, false),           // bridge_config
+            AccountMeta::new(deposit_intent_pda, false),          // deposit_intent
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false), // system_program
+        ];
+
+        let instruction = Instruction {
+            program_id: self.program_id,
+            accounts,
+            data,
+        };
+
+        let recent_blockhash = self.get_latest_blockhash().await?;
+        
+        let message = Message::new(&[instruction], Some(&self.payer.pubkey()));
+        let mut transaction = Transaction::new_unsigned(message);
+        transaction.sign(&[&*self.payer], recent_blockhash);
+
+        let signature = self.send_transaction(&transaction).await?;
+        tracing::info!(
+            "Created deposit intent #{} for {} (tx: {})",
+            deposit_nonce,
+            recipient,
+            signature
+        );
+
+        Ok(deposit_nonce)
+    }
+
+    /// Ensure deposit intent exists, creating it if necessary
+    pub async fn ensure_deposit_intent(
+        &self,
+        user: &Pubkey,
+    ) -> Result<u64> {
+        let deposit_nonce = self.get_deposit_nonce().await?;
+        
+        // Check if intent already exists for this user at current nonce
+        // We'll try a few recent nonces since we don't know which one corresponds to this deposit
+        for offset in 0..5 {
+            if deposit_nonce < offset {
+                break;
+            }
+            let check_id = deposit_nonce.saturating_sub(offset);
+            if self.deposit_intent_exists(user, check_id).await? {
+                tracing::info!("Found existing deposit intent #{} for user {}", check_id, user);
+                return Ok(check_id);
+            }
+        }
+
+        // No existing intent found, create one
+        tracing::info!("No deposit intent found for user {}, creating new one", user);
+        
+        // Create a UA hash (we don't have the actual UA, so use a hash of user + nonce)
+        let mut ua_hash = [0u8; 32];
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(user.as_ref());
+        hasher.update(&deposit_nonce.to_le_bytes());
+        hasher.update(b"hydex-ua-hash");
+        let result = hasher.finalize();
+        ua_hash.copy_from_slice(&result[..32]);
+
+        // Try to create - if it fails due to race condition, re-check for existing
+        match self.create_deposit_for_user(user, ua_hash).await {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                // Race condition - another node may have created it
+                tracing::warn!("Create failed ({}), re-checking for existing intent...", e);
+                
+                // Wait a moment for the other tx to confirm
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                
+                // Re-fetch nonce and check again
+                let new_nonce = self.get_deposit_nonce().await?;
+                for offset in 0..5 {
+                    if new_nonce < offset {
+                        break;
+                    }
+                    let check_id = new_nonce.saturating_sub(offset);
+                    if self.deposit_intent_exists(user, check_id).await? {
+                        tracing::info!("Found deposit intent #{} for {} after race (created by another node)", check_id, user);
+                        return Ok(check_id);
+                    }
+                }
+                
+                // Still not found - propagate original error
+                Err(e)
+            }
         }
     }
 
