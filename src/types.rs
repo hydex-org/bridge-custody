@@ -15,6 +15,8 @@ pub struct NodeConfig {
     pub enclave: EnclaveConfig,
     #[serde(default)]
     pub bridge_api: BridgeApiConfig,
+    #[serde(default)]
+    pub withdrawal: WithdrawalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +79,24 @@ pub struct BridgeApiConfig {
 
 fn default_bridge_api_url() -> String {
     "http://localhost:3001".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WithdrawalConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_withdrawal_poll_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_min_zcash_confirmations")]
+    pub min_zcash_confirmations: u32,
+}
+
+fn default_withdrawal_poll_interval() -> u64 {
+    15
+}
+
+fn default_min_zcash_confirmations() -> u32 {
+    2
 }
 
 impl NodeConfig {

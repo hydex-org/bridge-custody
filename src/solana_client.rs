@@ -632,6 +632,191 @@ impl BridgeSolanaClient {
         discriminator.copy_from_slice(&hash[..8]);
         discriminator
     }
+
+    // =========================================================================
+    // WITHDRAWAL METHODS
+    // =========================================================================
+
+    /// Derive burn intent PDA
+    pub fn derive_burn_intent_pda(&self, user: &Pubkey, burn_id: u64) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[
+                b"burn-intent",
+                user.as_ref(),
+                &burn_id.to_le_bytes(),
+            ],
+            &self.program_id,
+        )
+    }
+
+    /// Get current burn nonce from bridge config
+    pub async fn get_burn_nonce(&self) -> Result<u64> {
+        let (bridge_config_pda, _) = self.derive_bridge_config_pda();
+        
+        let data = self.get_account_data(&bridge_config_pda).await?
+            .ok_or_else(|| anyhow::anyhow!("Bridge config not found"))?;
+        
+        // BridgeConfig layout: discriminator(8) + bump(1) + admin(32) + enclave_authority(32) + 
+        //                      mpc_authority(32) + szec_mint(32) + deposit_nonce(8) + burn_nonce(8) + ...
+        // burn_nonce is at offset 8 + 1 + 32 + 32 + 32 + 32 + 8 = 145
+        if data.len() < 153 {
+            anyhow::bail!("Bridge config account data too short for burn_nonce");
+        }
+        
+        let nonce_bytes: [u8; 8] = data[145..153].try_into()?;
+        Ok(u64::from_le_bytes(nonce_bytes))
+    }
+
+    /// Fetch a specific burn intent by user and burn_id
+    pub async fn get_burn_intent(&self, user: &Pubkey, burn_id: u64) -> Result<Option<BurnIntentData>> {
+        let (burn_intent_pda, _) = self.derive_burn_intent_pda(user, burn_id);
+        
+        let data = match self.get_account_data(&burn_intent_pda).await? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        
+        // BurnIntent layout: discriminator(8) + bump(1) + burn_id(8) + user(32) + amount(8) + 
+        //                    status(1) + encrypted_data_hash(32) + zcash_txid(32) + created_at(8)
+        if data.len() < 130 {
+            anyhow::bail!("BurnIntent account data too short");
+        }
+        
+        let burn_id = u64::from_le_bytes(data[9..17].try_into()?);
+        let user = Pubkey::try_from(&data[17..49])?;
+        let amount = u64::from_le_bytes(data[49..57].try_into()?);
+        let status = data[57];
+        let mut encrypted_data_hash = [0u8; 32];
+        encrypted_data_hash.copy_from_slice(&data[58..90]);
+        let mut zcash_txid = [0u8; 32];
+        zcash_txid.copy_from_slice(&data[90..122]);
+        
+        Ok(Some(BurnIntentData {
+            burn_id,
+            user,
+            amount,
+            status,
+            encrypted_data_hash,
+            zcash_txid,
+        }))
+    }
+
+    /// Fetch all pending burn intents (status = 0)
+    /// Note: This scans recent burn IDs - for production, use getProgramAccounts with filters
+    pub async fn fetch_pending_burns(&self, max_lookback: u64) -> Result<Vec<BurnIntentData>> {
+        let burn_nonce = self.get_burn_nonce().await?;
+        let mut pending = Vec::new();
+        
+        // Scan recent burn intents
+        // Note: In production, this should use getProgramAccounts with memcmp filter
+        // For now, we'll scan backwards from the current nonce
+        let start = burn_nonce.saturating_sub(max_lookback);
+        
+        tracing::debug!("Scanning burn intents from {} to {}", start, burn_nonce);
+        
+        // We need to know the user addresses to check - this is a limitation
+        // In production, use getProgramAccounts RPC call
+        // For now, return empty - the actual implementation needs getProgramAccounts
+        
+        tracing::warn!(
+            "fetch_pending_burns: Need to implement getProgramAccounts. \
+            Current burn_nonce: {}",
+            burn_nonce
+        );
+        
+        Ok(pending)
+    }
+
+    /// Mark a burn intent as processing (status = 1)
+    pub async fn mark_burn_processing(
+        &self,
+        burn_id: u64,
+        user: &Pubkey,
+    ) -> Result<String> {
+        let discriminator = Self::get_instruction_discriminator("mark_burn_processing");
+        
+        let (bridge_config_pda, _) = self.derive_bridge_config_pda();
+        let (burn_intent_pda, _) = self.derive_burn_intent_pda(user, burn_id);
+        
+        let accounts = vec![
+            AccountMeta::new_readonly(self.payer.pubkey(), true), // authority (signer)
+            AccountMeta::new_readonly(bridge_config_pda, false),  // bridge_config
+            AccountMeta::new(burn_intent_pda, false),             // burn_intent
+        ];
+        
+        let instruction = Instruction {
+            program_id: self.program_id,
+            accounts,
+            data: discriminator.to_vec(),
+        };
+        
+        let recent_blockhash = self.get_latest_blockhash().await?;
+        let message = Message::new(&[instruction], Some(&self.payer.pubkey()));
+        let mut transaction = Transaction::new_unsigned(message);
+        transaction.sign(&[&*self.payer], recent_blockhash);
+        
+        let signature = self.send_transaction(&transaction).await?;
+        tracing::info!("Marked burn #{} as processing: {}", burn_id, signature);
+        
+        Ok(signature.to_string())
+    }
+
+    /// Finalize a withdrawal after Zcash TX is confirmed
+    pub async fn finalize_withdrawal(
+        &self,
+        burn_id: u64,
+        user: &Pubkey,
+        zcash_txid: [u8; 32],
+        success: bool,
+    ) -> Result<String> {
+        let discriminator = Self::get_instruction_discriminator("finalize_withdrawal");
+        
+        let mut data = Vec::new();
+        data.extend_from_slice(&discriminator);
+        data.extend_from_slice(&zcash_txid);              // 32 bytes
+        data.push(if success { 1 } else { 0 });           // 1 byte (bool)
+        
+        let (bridge_config_pda, _) = self.derive_bridge_config_pda();
+        let (burn_intent_pda, _) = self.derive_burn_intent_pda(user, burn_id);
+        
+        let accounts = vec![
+            AccountMeta::new_readonly(self.payer.pubkey(), true), // authority (signer)
+            AccountMeta::new_readonly(bridge_config_pda, false),  // bridge_config
+            AccountMeta::new(burn_intent_pda, false),             // burn_intent
+        ];
+        
+        let instruction = Instruction {
+            program_id: self.program_id,
+            accounts,
+            data,
+        };
+        
+        let recent_blockhash = self.get_latest_blockhash().await?;
+        let message = Message::new(&[instruction], Some(&self.payer.pubkey()));
+        let mut transaction = Transaction::new_unsigned(message);
+        transaction.sign(&[&*self.payer], recent_blockhash);
+        
+        let signature = self.send_transaction(&transaction).await?;
+        tracing::info!(
+            "Finalized withdrawal #{}: success={}, tx={}",
+            burn_id,
+            success,
+            signature
+        );
+        
+        Ok(signature.to_string())
+    }
+}
+
+/// Burn intent data from Solana
+#[derive(Debug, Clone)]
+pub struct BurnIntentData {
+    pub burn_id: u64,
+    pub user: Pubkey,
+    pub amount: u64,
+    pub status: u8,
+    pub encrypted_data_hash: [u8; 32],
+    pub zcash_txid: [u8; 32],
 }
 
 #[cfg(test)]

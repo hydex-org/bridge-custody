@@ -33,3 +33,8 @@ enabled = true
 [bridge_api]
 url = "http://host.docker.internal:3001"
 api_key = "hydex-internal-key"
+
+[withdrawal]
+enabled = true
+poll_interval_secs = 15
+min_zcash_confirmations = 2

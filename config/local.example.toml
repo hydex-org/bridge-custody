@@ -1,0 +1,38 @@
+node_id = 1
+total_nodes = 1
+threshold = 1
+
+# No peers for single-node local testing
+# [[peers]]
+
+[network]
+listen_address = "0.0.0.0"
+port = 8080
+
+[zcash]
+# Local zcashd or leave as placeholder (will skip actual ZEC sends if not available)
+rpc_url = "http://localhost:18232"
+rpc_user = "zcash"
+rpc_password = "zcash"
+network = "testnet"
+
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+bridge_program_id = "B12pxSGTH8bt8LtVcdbEXf2CPpf2sFJuj7SctsFuvcQc"
+# Use local Solana keypair (set to your path)
+keypair_path = "~/.config/solana/id.json"
+
+[enclave]
+url = "http://localhost:8089"
+poll_interval_secs = 10
+enabled = false  # Disable enclave for withdrawal testing
+
+[bridge_api]
+url = "http://localhost:3001"
+api_key = "hydex-internal-key"
+
+[withdrawal]
+enabled = true
+poll_interval_secs = 10
+min_zcash_confirmations = 1
+

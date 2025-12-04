@@ -1,6 +1,7 @@
 use anyhow::Result;
 use bridge_custody::{dkg_coordinator, network_http, types};
 use bridge_custody::attestation_service::{AttestationService, AttestationServiceConfig};
+use bridge_custody::withdrawal_service::{WithdrawalService, WithdrawalServiceConfig};
 use clap::Parser;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -179,6 +180,62 @@ async fn run_service(config: types::NodeConfig) -> Result<()> {
         println!("Attestation service started in background");
     } else {
         println!("Attestation service disabled (set enclave.enabled = true to enable)");
+    }
+
+    // =========================================================================
+    // START WITHDRAWAL SERVICE
+    // =========================================================================
+    if config.withdrawal.enabled {
+        println!("Starting withdrawal service...");
+        println!("   Zcash RPC: {}", config.zcash.rpc_url);
+        println!("   Solana RPC: {}", config.solana.rpc_url);
+        println!("   Poll interval: {}s", config.withdrawal.poll_interval_secs);
+
+        let withdrawal_config = WithdrawalServiceConfig {
+            poll_interval: Duration::from_secs(config.withdrawal.poll_interval_secs),
+            max_retries: 3,
+            retry_delay: Duration::from_secs(10),
+            min_zcash_confirmations: config.withdrawal.min_zcash_confirmations,
+        };
+
+        let zcash_rpc_url = config.zcash.rpc_url.clone();
+        let zcash_user = config.zcash.rpc_user.clone();
+        let zcash_pass = config.zcash.rpc_password.clone();
+        let solana_rpc_url = config.solana.rpc_url.clone();
+        let program_id = config.solana.bridge_program_id.clone();
+        let keypair_path = config.solana.keypair_path.clone();
+        let hydex_api_url = config.bridge_api.url.clone();
+        let hydex_api_key = config.bridge_api.api_key.clone();
+        let dkg_result_clone = _result.clone();
+
+        tokio::spawn(async move {
+            match WithdrawalService::new(
+                &solana_rpc_url,
+                &program_id,
+                &keypair_path,
+                &zcash_rpc_url,
+                &zcash_user,
+                &zcash_pass,
+                &hydex_api_url,
+                &hydex_api_key,
+                &dkg_result_clone,
+                withdrawal_config,
+            ) {
+                Ok(service) => {
+                    println!("Withdrawal service initialized");
+                    if let Err(e) = service.run().await {
+                        eprintln!("Withdrawal service error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to create withdrawal service: {}", e);
+                }
+            }
+        });
+
+        println!("Withdrawal service started in background");
+    } else {
+        println!("Withdrawal service disabled (set withdrawal.enabled = true to enable)");
     }
 
     // Start REST API server

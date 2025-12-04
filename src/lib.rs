@@ -36,3 +36,6 @@ pub mod address_manager;
 pub mod enclave_client;
 pub mod solana_client;
 pub mod attestation_service;
+
+// Withdrawal flow - MPC nodes poll Solana for burn intents and send ZEC
+pub mod withdrawal_service;
