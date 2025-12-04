@@ -1,5 +1,6 @@
 services:
   mpc-node1:
+    build: .
     image: bridge-custody:latest
     container_name: mpc-node1
     hostname: mpc-node1
@@ -23,6 +24,7 @@ services:
       start_period: 10s
 
   mpc-node2:
+    build: .
     image: bridge-custody:latest
     container_name: mpc-node2
     hostname: mpc-node2
@@ -48,6 +50,7 @@ services:
       - mpc-node1
 
   mpc-node3:
+    build: .
     image: bridge-custody:latest
     container_name: mpc-node3
     hostname: mpc-node3
