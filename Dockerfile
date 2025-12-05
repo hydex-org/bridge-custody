@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Copy everything from bridge-custody (including vendored frost-pallas)
 COPY bridge-custody/ .
-COPY frost-pallas/ ./frost-pallas/
+COPY frost-pallas/ /frost-pallas/
 
 # Build in release mode
 RUN cargo build --release

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Local dependencies (vendored in this repo)
-frost-pallas = { path = "./frost-pallas" }
+# Local dependencies (in parent directory)
+frost-pallas = { path = "../frost-pallas" }
 
 # Zcash stack
 zcash_primitives = "0.13"

@@ -1,4 +1,12 @@
+# Build output
 /target
-/data/node1
-/data/node2
-/data/node3
+
+# Data directories
+/data/
+
+# Local config (use local.example.toml as template)
+/config/local.toml
+
+# Solana keypairs
+*.json
+!Cargo.json
